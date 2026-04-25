@@ -839,6 +839,10 @@ export function KanbanContainer() {
   }, [localWorkspacesById]);
 
   useEffect(() => {
+    if (isWorkspacesListLoading) {
+      return;
+    }
+
     const currentStatuses = new Map(
       issues.map((issue) => [issue.id, issue.status_id])
     );
@@ -871,7 +875,7 @@ export function KanbanContainer() {
         void startAutoReviewForIssue(issue.id);
       }
     }
-  }, [issues, statuses, startAutoReviewForIssue]);
+  }, [issues, statuses, startAutoReviewForIssue, isWorkspacesListLoading]);
 
   // Calculate sort_order based on column index and issue position
   // Formula: 1000 * [COLUMN_INDEX] + [ISSUE_INDEX] (both 1-based)
