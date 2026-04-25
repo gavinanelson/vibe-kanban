@@ -122,7 +122,7 @@ const areKanbanFiltersEqual = (
   );
 };
 
-const AUTO_REVIEW_SESSION_NAME = 'Auto review — Codex';
+const AUTO_REVIEW_SESSION_NAME = 'Auto review - Codex';
 const AUTO_REVIEW_PROMPT = [
   'Review this workspace as an independent Codex reviewer.',
   'Do not make implementation changes unless they are required to run verification or produce review evidence.',
