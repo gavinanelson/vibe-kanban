@@ -1138,6 +1138,7 @@ def finalize_reviewed_card(card: Card) -> None:
     if latest_impl and latest_review and latest_impl.get("completed_at") and latest_impl["completed_at"] > latest_review["completed_at"]:
         if "review fix" in (latest_impl.get("session") or "").lower() and not fix_process_has_substantive_result(latest_impl):
             print(f"{card.simple_id}: ignoring latest review-fix after review because it was {latest_impl['status']} or no-op")
+            return
     if latest_impl and latest_impl["status"] == "completed" and str(latest_impl["exit_code"]) == "0" and latest_review and latest_impl["completed_at"] > latest_review["completed_at"]:
         pr = ensure_pr(card, allow_merged_issue_pr=False)
         if pr:
