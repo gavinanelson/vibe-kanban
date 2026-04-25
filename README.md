@@ -152,6 +152,26 @@ pnpm run build
 1. Run `./local-build.sh`
 2. Test with `cd npx-cli && node bin/cli.js`
 
+`./local-build.sh` also uses `scripts/resource-safe-cargo.sh` for its release
+builds by default.
+
+### Resource-safe native and release builds
+
+Use the checked-in safe build paths for local native or release builds. They
+serialise Cargo work and disable release debug information by default so a build
+does not exhaust memory on 16 GB laptops or shared development hosts.
+
+```bash
+pnpm run tauri:build
+# or, for a direct Rust release build:
+./scripts/resource-safe-cargo.sh build --release -p vibe-kanban-tauri
+```
+
+The wrapper prints the effective `CARGO_BUILD_JOBS`, release debug, split debug
+information, incremental, and `RUSTFLAGS` settings before it starts Cargo. See
+[Resource-safe Builds](https://vibekanban.com/docs/self-hosting/resource-safe-builds)
+for the full guardrail and override contract.
+
 ### Environment Variables
 
 The following environment variables can be configured at build time or runtime:
