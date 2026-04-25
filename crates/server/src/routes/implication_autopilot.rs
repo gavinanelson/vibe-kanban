@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{future::Future, path::PathBuf};
 
 use axum::{
     Extension, Json, Router,
@@ -15,7 +15,8 @@ use db::models::{
 use deployment::Deployment;
 use executors::{
     actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_initial::CodingAgentInitialRequest,
+        ExecutorAction, ExecutorActionType,
+        coding_agent_initial::CodingAgentInitialRequest,
         review::{RepoReviewContext as ExecutorRepoReviewContext, ReviewRequest as ReviewAction},
     },
     executors::{BaseCodingAgent, build_review_prompt},
@@ -155,7 +156,7 @@ async fn start_auto_review(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<StartAutopilotReviewRequest>,
 ) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
-    ensure_implication_autopilot_allowed(&workspace, payload.github_repo_full_name.as_deref())?;
+    ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
 
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
@@ -209,8 +210,8 @@ async fn start_auto_review(
         .container()
         .ensure_container_exists(&workspace)
         .await?;
-    let context = build_autopilot_review_context(&deployment, &workspace, container_ref.as_str())
-        .await?;
+    let context =
+        build_autopilot_review_context(&deployment, &workspace, container_ref.as_str()).await?;
     let executor_config = default_codex_config();
     let prompt = build_review_prompt(context.as_deref(), Some(REVIEW_PROMPT));
     let action = ExecutorAction::new(
@@ -251,9 +252,9 @@ async fn start_auto_review(
 async fn start_review_fix(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<StartAutopilotReviewFixRequest>,
+    Json(_payload): Json<StartAutopilotReviewFixRequest>,
 ) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
-    ensure_implication_autopilot_allowed(&workspace, payload.github_repo_full_name.as_deref())?;
+    ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
 
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
@@ -361,11 +362,11 @@ async fn build_autopilot_review_context(
     let mut contexts = Vec::new();
     for repo in repos {
         let worktree_path = workspace_path.join(&repo.repo.name);
-        if let Ok(base_commit) = deployment.git().get_fork_point(
-            &worktree_path,
-            &repo.target_branch,
-            &workspace.branch,
-        ) {
+        if let Ok(base_commit) =
+            deployment
+                .git()
+                .get_fork_point(&worktree_path, &repo.target_branch, &workspace.branch)
+        {
             contexts.push(ExecutorRepoReviewContext {
                 repo_id: repo.repo.id,
                 repo_name: repo.repo.display_name,
@@ -377,29 +378,38 @@ async fn build_autopilot_review_context(
     Ok((!contexts.is_empty()).then_some(contexts))
 }
 
-fn ensure_implication_autopilot_allowed(
+async fn ensure_implication_autopilot_allowed(
+    deployment: &DeploymentImpl,
     workspace: &Workspace,
-    github_repo_full_name: Option<&str>,
 ) -> Result<(), ApiError> {
-    if workspace.task_id.is_none() {
+    let client = deployment.remote_client()?;
+    let remote_workspace = client.get_workspace_by_local_id(workspace.id).await?;
+    let Some(issue_id) = remote_workspace.issue_id else {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
             "Implication autopilot requires a linked board issue.".to_string(),
         )));
-    }
-
-    let Some(repo) = github_repo_full_name else {
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            "Implication autopilot requires a linked GitHub issue repo.".to_string(),
-        )));
     };
 
-    if repo.trim().eq_ignore_ascii_case("gavinanelson/implication") {
+    let issue = client.get_issue(issue_id).await?;
+    if is_implication_issue_metadata(&issue.extension_metadata) {
         return Ok(());
     }
 
     Err(ApiError::Workspace(WorkspaceError::ValidationError(
         "Implication autopilot is only enabled for gavinanelson/implication issues.".to_string(),
     )))
+}
+
+fn is_implication_issue_metadata(metadata: &Value) -> bool {
+    let Some(repo) = metadata
+        .get("github_link")
+        .and_then(|link| link.get("repo_full_name"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+
+    repo.trim().eq_ignore_ascii_case("gavinanelson/implication")
 }
 
 fn auto_review_session_name(rerun: bool) -> String {
@@ -571,34 +581,43 @@ async fn decide_from_review_attempts<'a>(
     deployment: &DeploymentImpl,
     reviews: &[&'a ProcessRow],
 ) -> (AutopilotDecision, Option<String>, Option<&'a ProcessRow>) {
+    decide_from_review_attempts_with_loader(reviews, |process_id| async move {
+        process_agent_text(deployment, process_id).await
+    })
+    .await
+}
+
+async fn decide_from_review_attempts_with_loader<'a, F, Fut>(
+    reviews: &[&'a ProcessRow],
+    mut load_text: F,
+) -> (AutopilotDecision, Option<String>, Option<&'a ProcessRow>)
+where
+    F: FnMut(Uuid) -> Fut,
+    Fut: Future<Output = String>,
+{
     if reviews.is_empty() {
         return (AutopilotDecision::Missing, None, None);
     }
-    if let Some(row) = running_review_attempt(reviews) {
-        return (AutopilotDecision::Running, None, Some(row));
-    }
-
-    for row in reviews {
-        if row.status != ExecutionProcessStatus::Completed || row.exit_code != Some(0) {
-            continue;
-        }
-        let text = process_agent_text(deployment, row.id).await;
-        if text.trim().is_empty() {
-            continue;
-        }
-        let decision = decision_from_text(&text);
-        return (decision, Some(excerpt(&text)), Some(*row));
-    }
 
     let latest = reviews[0];
-    if latest.status == ExecutionProcessStatus::Killed
-        || latest.status == ExecutionProcessStatus::Completed
-    {
-        return (AutopilotDecision::Missing, None, Some(latest));
+    if latest.status == ExecutionProcessStatus::Running {
+        return (AutopilotDecision::Running, None, Some(latest));
     }
+
+    if latest.status == ExecutionProcessStatus::Completed && latest.exit_code == Some(0) {
+        let text = load_text(latest.id).await;
+        if text.trim().is_empty() {
+            return (AutopilotDecision::Failed, None, Some(latest));
+        }
+
+        let decision = decision_from_text(&text);
+        return (decision, Some(excerpt(&text)), Some(latest));
+    }
+
     (AutopilotDecision::Failed, None, Some(latest))
 }
 
+#[cfg(test)]
 fn running_review_attempt<'a>(reviews: &[&'a ProcessRow]) -> Option<&'a ProcessRow> {
     reviews
         .iter()
@@ -1041,7 +1060,10 @@ mod tests {
         assert!(is_auto_review_session(Some(
             "Auto review rerun - Codex (medium)"
         )));
-        assert_eq!(auto_review_session_name(false), "Auto review - Codex (medium)");
+        assert_eq!(
+            auto_review_session_name(false),
+            "Auto review - Codex (medium)"
+        );
         assert_eq!(
             auto_review_session_name(true),
             "Auto review rerun - Codex (medium)"
@@ -1049,9 +1071,11 @@ mod tests {
         assert_eq!(review_fix_session_name(), "Review fix - Codex (medium)");
         assert!(is_review_fix_session(Some("Review fix - Codex (medium)")));
         assert!(!is_auto_review_session(Some("Review fix - Codex (medium)")));
-        assert!(!review_fix_session_name()
-            .to_ascii_lowercase()
-            .starts_with("auto review"));
+        assert!(
+            !review_fix_session_name()
+                .to_ascii_lowercase()
+                .starts_with("auto review")
+        );
     }
 
     #[test]
@@ -1123,6 +1147,73 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn latest_empty_review_attempt_is_failed_instead_of_falling_back_to_older_pass() {
+        let latest_empty = completed_process("Auto review rerun - Codex (medium)", 0);
+        let older_pass = completed_process("Auto review - Codex (medium)", 0);
+        let reviews = vec![&latest_empty, &older_pass];
+
+        let (decision, excerpt, row) =
+            decide_from_review_attempts_with_loader(&reviews, |process_id| async move {
+                if process_id == older_pass.id {
+                    "Decision: pass\nNo blockers.".to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .await;
+
+        assert_eq!(decision, AutopilotDecision::Failed);
+        assert_eq!(excerpt, None);
+        assert_eq!(row.map(|row| row.id), Some(latest_empty.id));
+    }
+
+    #[tokio::test]
+    async fn latest_failed_review_attempt_is_failed_instead_of_falling_back_to_older_pass() {
+        let latest_failed = completed_process("Auto review rerun - Codex (medium)", 1);
+        let older_pass = completed_process("Auto review - Codex (medium)", 0);
+        let reviews = vec![&latest_failed, &older_pass];
+
+        let (decision, excerpt, row) =
+            decide_from_review_attempts_with_loader(&reviews, |process_id| async move {
+                if process_id == older_pass.id {
+                    "Decision: pass\nNo blockers.".to_string()
+                } else {
+                    String::new()
+                }
+            })
+            .await;
+
+        assert_eq!(decision, AutopilotDecision::Failed);
+        assert_eq!(excerpt, None);
+        assert_eq!(row.map(|row| row.id), Some(latest_failed.id));
+    }
+
+    #[test]
+    fn implication_eligibility_reads_repo_from_issue_metadata() {
+        let metadata = serde_json::json!({
+            "github_link": {
+                "repo_full_name": "gavinanelson/implication",
+                "issue_number": 264,
+                "issue_url": "https://github.com/gavinanelson/implication/issues/264"
+            }
+        });
+
+        assert!(is_implication_issue_metadata(&metadata));
+
+        let spoofed_payload_repo = "gavinanelson/implication";
+        let metadata = serde_json::json!({
+            "github_link": {
+                "repo_full_name": "gavinanelson/vibe-kanban",
+                "issue_number": 2,
+                "issue_url": "https://github.com/gavinanelson/vibe-kanban/issues/2"
+            }
+        });
+
+        assert_eq!(spoofed_payload_repo, "gavinanelson/implication");
+        assert!(!is_implication_issue_metadata(&metadata));
+    }
+
     #[test]
     fn action_gating_allows_review_fix_only_after_clean_implementation_and_requested_changes() {
         let implementation = completed_process("Implementation", 0);
@@ -1157,22 +1248,13 @@ mod tests {
 
     #[test]
     fn eligibility_requires_implication_repo_and_linked_issue() {
-        let mut workspace = workspace();
-        assert!(
-            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/implication"))
-                .is_ok()
-        );
-
-        assert!(
-            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/vibe-kanban"))
-                .is_err()
-        );
-
-        workspace.task_id = None;
-        assert!(
-            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/implication"))
-                .is_err()
-        );
+        assert!(!is_implication_issue_metadata(&serde_json::json!({})));
+        assert!(!is_implication_issue_metadata(&serde_json::json!({
+            "github_link": {
+                "issue_number": 264,
+                "issue_url": "https://github.com/gavinanelson/implication/issues/264"
+            }
+        })));
     }
 
     #[test]

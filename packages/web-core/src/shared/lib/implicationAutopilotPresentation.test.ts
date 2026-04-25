@@ -7,19 +7,20 @@ import {
 
 describe('implication autopilot presentation', () => {
   it('formats next action tokens as operator-facing copy', () => {
-    expect(getImplicationAutopilotNextActionDisplay('start_auto_review')).toEqual(
-      {
-        label: 'Start auto-review',
-        description: 'Implementation is complete and ready for a Codex review.',
-      }
-    );
+    expect(
+      getImplicationAutopilotNextActionDisplay('start_auto_review')
+    ).toEqual({
+      label: 'Start auto-review',
+      description: 'Implementation is complete and ready for a Codex review.',
+    });
 
-    expect(getImplicationAutopilotNextActionDisplay('wait_for_review_fix')).toEqual(
-      {
-        label: 'Fix running',
-        description: 'Requested changes are being handled by a Codex fix session.',
-      }
-    );
+    expect(
+      getImplicationAutopilotNextActionDisplay('wait_for_review_fix')
+    ).toEqual({
+      label: 'Fix running',
+      description:
+        'Requested changes are being handled by a Codex fix session.',
+    });
 
     expect(getImplicationAutopilotNextActionDisplay('ready_for_merge')).toEqual(
       {
