@@ -191,7 +191,7 @@ export function buildImplicationAutopilotPanelStatus(
   const currentStepLabel = currentStepLabelFor(status.next_action, status);
   const nextActionDescription =
     status.next_action === 'start_auto_review' && hasCompletedReviewFix
-      ? 'Review fix completed; start an explicit guarded re-review for the updated workspace state.'
+      ? 'Review fix completed; start an explicit rerun with guarded re-review for the updated workspace state.'
       : nextActionDisplay.description;
 
   return {
