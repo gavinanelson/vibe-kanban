@@ -1713,6 +1713,20 @@ export const implicationAutopilotApi = {
     );
     return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
   },
+
+  startReviewFix: async (
+    workspaceId: string,
+    hostId?: string | null
+  ): Promise<ImplicationAutopilotProcessSummary> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}/implication-autopilot/review-fix`,
+      hostId,
+      {
+        method: 'POST',
+      }
+    );
+    return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
+  },
 };
 
 // Relay API

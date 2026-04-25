@@ -11,7 +11,10 @@ use db::models::{
 };
 use deployment::Deployment;
 use executors::{
-    actions::{ExecutorAction, ExecutorActionType, review::ReviewRequest as ReviewAction},
+    actions::{
+        ExecutorAction, ExecutorActionType, coding_agent_initial::CodingAgentInitialRequest,
+        review::ReviewRequest as ReviewAction,
+    },
     executors::{BaseCodingAgent, build_review_prompt},
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
@@ -29,6 +32,7 @@ use crate::{DeploymentImpl, error::ApiError, middleware::load_workspace_middlewa
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 const DEFAULT_CODEX_REASONING: &str = "medium";
 const REVIEW_PROMPT: &str = "Review this workspace as an independent Codex reviewer. Do not implement changes. Check the linked GitHub issue acceptance criteria, PR/diff scope, validation evidence, and hygiene. Return one of exactly `Decision: pass` or `Decision: request changes`, followed by blockers, non-blocking notes, validation evidence, and recommended next action.";
+const REVIEW_FIX_PROMPT: &str = "Continue the existing implementation by fixing only the blocking issues from the latest auto-review. Use Codex gpt-5.5 with medium reasoning. Keep the change bounded, preserve unrelated dirty work, run focused validation, and do not merge or claim the PR is merged. End with files changed, validation, and whether another auto-review is needed.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +121,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             "/workspaces/{id}/implication-autopilot/review",
             post(start_auto_review),
         )
+        .route(
+            "/workspaces/{id}/implication-autopilot/review-fix",
+            post(start_review_fix),
+        )
         .layer(axum::middleware::from_fn_with_state(
             deployment.clone(),
             load_workspace_middleware,
@@ -169,14 +177,7 @@ async fn start_auto_review(
         .ensure_container_exists(&workspace)
         .await?;
     let _ = container_ref;
-    let executor_config = ExecutorConfig {
-        executor: BaseCodingAgent::Codex,
-        variant: None,
-        model_id: Some(DEFAULT_CODEX_MODEL.to_string()),
-        agent_id: None,
-        reasoning_id: Some(DEFAULT_CODEX_REASONING.to_string()),
-        permission_policy: Some(PermissionPolicy::Auto),
-    };
+    let executor_config = default_codex_config();
     let prompt = build_review_prompt(None, Some(REVIEW_PROMPT));
     let action = ExecutorAction::new(
         ExecutorActionType::ReviewRequest(ReviewAction {
@@ -210,6 +211,116 @@ async fn start_auto_review(
             .completed_at
             .map(|dt: DateTime<Utc>| dt.to_rfc3339()),
     })))
+}
+
+#[axum::debug_handler]
+async fn start_review_fix(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
+    if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
+        &deployment.db().pool,
+        workspace.id,
+    )
+    .await?
+    {
+        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+            "Workspace already has a running agent process".to_string(),
+        )));
+    }
+
+    let rows = list_processes(&deployment.db().pool, workspace.id).await?;
+    let implementation_process = rows.iter().find(|row| is_implementation_process(row));
+    let review_processes: Vec<&ProcessRow> = rows
+        .iter()
+        .filter(|row| is_auto_review_session(row.session_name.as_deref()))
+        .collect();
+    let review_fix_process = rows
+        .iter()
+        .find(|row| is_review_fix_session(row.session_name.as_deref()));
+    let (latest_review_decision, latest_review_excerpt, _) =
+        decide_from_review_attempts(&deployment, &review_processes).await;
+
+    if let Err(message) = review_fix_start_gate(
+        &workspace,
+        implementation_process,
+        &latest_review_decision,
+        review_fix_process,
+    ) {
+        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+            message,
+        )));
+    }
+
+    let session = Session::create(
+        &deployment.db().pool,
+        &CreateSession {
+            executor: Some("CODEX".to_string()),
+            name: Some(format!(
+                "Auto review fix - Codex ({})",
+                DEFAULT_CODEX_REASONING
+            )),
+        },
+        Uuid::new_v4(),
+        workspace.id,
+    )
+    .await?;
+
+    deployment
+        .container()
+        .ensure_container_exists(&workspace)
+        .await?;
+
+    let prompt = match latest_review_excerpt {
+        Some(excerpt) => format!("{REVIEW_FIX_PROMPT}\n\nLatest auto-review excerpt:\n{excerpt}"),
+        None => REVIEW_FIX_PROMPT.to_string(),
+    };
+    let working_dir = session
+        .agent_working_dir
+        .as_ref()
+        .filter(|dir| !dir.is_empty())
+        .cloned();
+    let action = ExecutorAction::new(
+        ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
+            prompt,
+            executor_config: default_codex_config(),
+            working_dir,
+        }),
+        None,
+    );
+    let process = deployment
+        .container()
+        .start_execution(
+            &workspace,
+            &session,
+            &action,
+            &ExecutionProcessRunReason::CodingAgent,
+        )
+        .await?;
+
+    Ok(Json(ApiResponse::success(AutopilotProcessSummary {
+        id: process.id,
+        session_id: process.session_id,
+        session_name: session.name,
+        status: process.status,
+        run_reason: process.run_reason,
+        exit_code: process.exit_code,
+        started_at: process.started_at.to_rfc3339(),
+        completed_at: process
+            .completed_at
+            .map(|dt: DateTime<Utc>| dt.to_rfc3339()),
+    })))
+}
+
+fn default_codex_config() -> ExecutorConfig {
+    ExecutorConfig {
+        executor: BaseCodingAgent::Codex,
+        variant: None,
+        model_id: Some(DEFAULT_CODEX_MODEL.to_string()),
+        agent_id: None,
+        reasoning_id: Some(DEFAULT_CODEX_REASONING.to_string()),
+        permission_policy: Some(PermissionPolicy::Auto),
+    }
 }
 
 async fn build_status(
@@ -604,6 +715,40 @@ fn infer_pr_merge_state(workspace: &Workspace, decision: &AutopilotDecision) -> 
     }
 }
 
+fn review_fix_start_gate(
+    workspace: &Workspace,
+    implementation: Option<&ProcessRow>,
+    decision: &AutopilotDecision,
+    review_fix: Option<&ProcessRow>,
+) -> Result<(), String> {
+    if workspace.archived || workspace.worktree_deleted {
+        return Err("Workspace is archived or deleted.".to_string());
+    }
+    let Some(implementation) = implementation else {
+        return Err("No implementation process was found for this workspace.".to_string());
+    };
+    if implementation.status == ExecutionProcessStatus::Running {
+        return Err("Implementation is still running.".to_string());
+    }
+    if implementation.status != ExecutionProcessStatus::Completed
+        || implementation.exit_code != Some(0)
+    {
+        return Err("Latest implementation process did not complete cleanly.".to_string());
+    }
+    if decision != &AutopilotDecision::RequestChanges {
+        return Err("Review fix can only start after auto-review requests changes.".to_string());
+    }
+    if let Some(row) = review_fix {
+        if row.status == ExecutionProcessStatus::Running {
+            return Err("Review fix is already running.".to_string());
+        }
+        if row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0) {
+            return Err("Review fix already completed; rerun auto-review next.".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn next_action(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
@@ -654,6 +799,10 @@ fn next_action(
             }
             _ => (AutopilotNextAction::StartReviewFix, None),
         },
+        // TODO(implication-autopilot): wire a safe PR merge helper here when the
+        // app can prove the PR is mergeable and checks/review requirements pass.
+        // The existing direct workspace merge helper intentionally rejects open
+        // PRs, so this state must remain an honest operator handoff for now.
         AutopilotDecision::Pass => (
             AutopilotNextAction::ReadyForMerge,
             Some(
@@ -667,6 +816,36 @@ fn next_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn workspace() -> Workspace {
+        let now = Utc::now();
+        Workspace {
+            id: Uuid::new_v4(),
+            task_id: None,
+            container_ref: None,
+            branch: "issue-264".to_string(),
+            setup_completed_at: Some(now),
+            created_at: now,
+            updated_at: now,
+            archived: false,
+            pinned: false,
+            name: Some("Issue 264".to_string()),
+            worktree_deleted: false,
+        }
+    }
+
+    fn completed_process(name: &str, exit_code: i64) -> ProcessRow {
+        ProcessRow {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_name: Some(name.to_string()),
+            status: ExecutionProcessStatus::Completed,
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+            exit_code: Some(exit_code),
+            started_at: Utc::now().to_rfc3339(),
+            completed_at: Some(Utc::now().to_rfc3339()),
+        }
+    }
 
     #[test]
     fn decision_prefers_request_changes_when_blockers_present() {
@@ -715,5 +894,53 @@ mod tests {
             extract_process_agent_text([line]),
             "Blocker: missing test\nDecision: request changes"
         );
+    }
+
+    #[test]
+    fn action_gating_allows_review_fix_only_after_clean_implementation_and_requested_changes() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                None
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn action_gating_blocks_review_fix_without_requested_changes() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::Pass,
+                None
+            ),
+            Err("Review fix can only start after auto-review requests changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn next_action_surfaces_review_pass_as_ready_for_merge_but_not_automated() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            "review_passed_merge_status_unknown",
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::ReadyForMerge);
+        assert!(blocker.unwrap().contains("not daemonized"));
     }
 }

@@ -330,6 +330,22 @@ export function KanbanIssuePanelContainer({
     },
   });
 
+  const startReviewFixMutation = useMutation({
+    mutationFn: () =>
+      implicationAutopilotApi.startReviewFix(
+        selectedIssueLocalWorkspaceId!,
+        routeState.hostId
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: autopilotQueryKey });
+      if (selectedIssueLocalWorkspaceId) {
+        queryClient.invalidateQueries({
+          queryKey: ['processes', selectedIssueLocalWorkspaceId],
+        });
+      }
+    },
+  });
+
   const implicationAutopilotPanelStatus = useMemo(() => {
     if (!shouldShowImplicationAutopilot) return null;
     if (!selectedIssueLocalWorkspaceId) {
@@ -1332,6 +1348,14 @@ export function KanbanIssuePanelContainer({
           : undefined
       }
       isStartingImplicationAutoReview={startAutoReviewMutation.isPending}
+      onStartImplicationReviewFix={
+        shouldShowImplicationAutopilot &&
+        selectedIssueLocalWorkspaceId &&
+        implicationAutopilotPanelStatus?.nextAction === 'start_review_fix'
+          ? () => startReviewFixMutation.mutate()
+          : undefined
+      }
+      isStartingImplicationReviewFix={startReviewFixMutation.isPending}
       onClose={closeKanbanIssuePanel}
       onSubmit={handleSubmit}
       onCmdEnterSubmit={handleCmdEnterSubmit}

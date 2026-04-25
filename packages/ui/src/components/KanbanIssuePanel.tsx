@@ -143,6 +143,8 @@ export interface KanbanIssuePanelProps {
   onRefreshImplicationAutopilot?: () => void;
   onStartImplicationAutoReview?: () => void;
   isStartingImplicationAutoReview?: boolean;
+  onStartImplicationReviewFix?: () => void;
+  isStartingImplicationReviewFix?: boolean;
 
   // Actions
   onClose: () => void;
@@ -231,6 +233,8 @@ export function KanbanIssuePanel({
   onRefreshImplicationAutopilot,
   onStartImplicationAutoReview,
   isStartingImplicationAutoReview,
+  onStartImplicationReviewFix,
+  isStartingImplicationReviewFix,
   onClose,
   onSubmit,
   onCmdEnterSubmit,
@@ -581,6 +585,30 @@ export function KanbanIssuePanel({
                         Start review
                       </button>
                     )}
+                  {onStartImplicationReviewFix &&
+                    implicationAutopilotStatus?.nextAction ===
+                      'start_review_fix' && (
+                      <button
+                        type="button"
+                        onClick={onStartImplicationReviewFix}
+                        disabled={isStartingImplicationReviewFix}
+                        className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                      >
+                        <PlayIcon className="size-icon-xs" weight="bold" />
+                        Start review fix
+                      </button>
+                    )}
+                  {implicationAutopilotStatus?.nextAction ===
+                    'ready_for_merge' && (
+                    <button
+                      type="button"
+                      disabled
+                      className="inline-flex items-center gap-half rounded-sm border border-border px-half py-half text-xs text-low opacity-70"
+                      title="Review passed, but PR merge automation is not wired in this UI slice yet."
+                    >
+                      Merge pending
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
