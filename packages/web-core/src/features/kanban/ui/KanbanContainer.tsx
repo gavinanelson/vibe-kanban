@@ -86,6 +86,7 @@ import {
   isReviewStatusName,
   type PendingAutoReview,
 } from '@/shared/lib/autoReviewStatus';
+import { getAutoReviewLocalWorkspaceId } from '@/shared/lib/autoReviewWorkspace';
 
 const areStringSetsEqual = (left: string[], right: string[]): boolean => {
   if (left.length !== right.length) {
@@ -690,11 +691,10 @@ export function KanbanContainer() {
   const startAutoReviewForIssue = useCallback(
     async (issueId: string) => {
       const hostId = effectiveHostId;
-      const workspacesForIssue = getWorkspacesForIssue(issueId).filter(
-        (workspace) => !workspace.archived && workspace.local_workspace_id
+      const localWorkspaceId = getAutoReviewLocalWorkspaceId(
+        getWorkspacesForIssue(issueId),
+        localWorkspacesById
       );
-      const workspace = workspacesForIssue[0];
-      const localWorkspaceId = workspace?.local_workspace_id;
       if (!localWorkspaceId) {
         console.warn(
           'Skipping auto-review: issue has no linked local workspace',
@@ -785,7 +785,12 @@ export function KanbanContainer() {
         });
       }
     },
-    [effectiveHostId, getTagObjectsForIssue, getWorkspacesForIssue]
+    [
+      effectiveHostId,
+      getTagObjectsForIssue,
+      getWorkspacesForIssue,
+      localWorkspacesById,
+    ]
   );
 
   useEffect(() => {
