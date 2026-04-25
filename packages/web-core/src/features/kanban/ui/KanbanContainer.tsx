@@ -86,6 +86,8 @@ import {
   isReviewStatusName,
   type PendingAutoReview,
 } from '@/shared/lib/autoReviewStatus';
+import { getAutoReviewTransitionIssueIds } from '@/shared/lib/autoReviewTransitions';
+import { getAutoReviewLocalWorkspaceId } from '@/shared/lib/autoReviewWorkspace';
 
 const areStringSetsEqual = (left: string[], right: string[]): boolean => {
   if (left.length !== right.length) {
@@ -184,11 +186,12 @@ export function KanbanContainer() {
     membersWithProfilesById,
     isLoading: orgLoading,
   } = useOrgContext();
-  const { activeWorkspaces } = useWorkspaceContext();
+  const { activeWorkspaces, isWorkspacesListLoading } = useWorkspaceContext();
   const { userId } = useAuth();
   const effectiveHostId = useHostId();
   const autoReviewTransitionsRef = useRef<Set<string>>(new Set());
   const previousIssueStatusByIdRef = useRef<Map<string, string> | null>(null);
+  const pendingAutoReviewIssueIdsRef = useRef<Set<string>>(new Set());
   const [pendingAutoReviewsByIssueId, setPendingAutoReviewsByIssueId] =
     useState<Record<string, PendingAutoReview>>({});
 
@@ -689,12 +692,16 @@ export function KanbanContainer() {
 
   const startAutoReviewForIssue = useCallback(
     async (issueId: string) => {
+      if (isWorkspacesListLoading) {
+        pendingAutoReviewIssueIdsRef.current.add(issueId);
+        return;
+      }
+
       const hostId = effectiveHostId;
-      const workspacesForIssue = getWorkspacesForIssue(issueId).filter(
-        (workspace) => !workspace.archived && workspace.local_workspace_id
+      const localWorkspaceId = getAutoReviewLocalWorkspaceId(
+        getWorkspacesForIssue(issueId),
+        localWorkspacesById
       );
-      const workspace = workspacesForIssue[0];
-      const localWorkspaceId = workspace?.local_workspace_id;
       if (!localWorkspaceId) {
         console.warn(
           'Skipping auto-review: issue has no linked local workspace',
@@ -785,7 +792,13 @@ export function KanbanContainer() {
         });
       }
     },
-    [effectiveHostId, getTagObjectsForIssue, getWorkspacesForIssue]
+    [
+      effectiveHostId,
+      getTagObjectsForIssue,
+      getWorkspacesForIssue,
+      isWorkspacesListLoading,
+      localWorkspacesById,
+    ]
   );
 
   useEffect(() => {
@@ -833,11 +846,11 @@ export function KanbanContainer() {
       issues.map((issue) => [issue.id, issue.status_id])
     );
     const previousStatuses = previousIssueStatusByIdRef.current;
-    previousIssueStatusByIdRef.current = currentStatuses;
 
     // Seed the previous-status map on first load without firing reviews for
     // cards that were already waiting in review before this client mounted.
     if (!previousStatuses) {
+      previousIssueStatusByIdRef.current = currentStatuses;
       return;
     }
 
@@ -848,20 +861,31 @@ export function KanbanContainer() {
     );
 
     if (reviewStatusIds.size === 0) {
+      previousIssueStatusByIdRef.current = currentStatuses;
       return;
     }
 
-    for (const issue of issues) {
-      const previousStatusId = previousStatuses.get(issue.id);
-      if (
-        previousStatusId &&
-        previousStatusId !== issue.status_id &&
-        reviewStatusIds.has(issue.status_id)
-      ) {
-        void startAutoReviewForIssue(issue.id);
-      }
+    const reviewIssueIds = getAutoReviewTransitionIssueIds({
+      issues,
+      previousStatusByIssueId: previousStatuses,
+      reviewStatusIds,
+      pendingIssueIds: pendingAutoReviewIssueIdsRef.current,
+    });
+
+    previousIssueStatusByIdRef.current = currentStatuses;
+
+    for (const issueId of reviewIssueIds) {
+      pendingAutoReviewIssueIdsRef.current.delete(issueId);
+      void startAutoReviewForIssue(issueId);
     }
-  }, [issues, statuses, startAutoReviewForIssue]);
+  }, [
+    getWorkspacesForIssue,
+    issues,
+    statuses,
+    startAutoReviewForIssue,
+    isWorkspacesListLoading,
+    localWorkspacesById,
+  ]);
 
   // Calculate sort_order based on column index and issue position
   // Formula: 1000 * [COLUMN_INDEX] + [ISSUE_INDEX] (both 1-based)
