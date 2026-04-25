@@ -42,6 +42,8 @@ fi
 echo "🔍 Detected platform: $PLATFORM"
 echo "🔧 Using target directory: $CARGO_TARGET_DIR"
 
+RESOURCE_SAFE_CARGO="${RESOURCE_SAFE_CARGO:-./scripts/resource-safe-cargo.sh}"
+
 # Set API base URL for remote features
 export VK_SHARED_API_BASE="https://api.vibekanban.com"
 export VITE_VK_SHARED_API_BASE="https://api.vibekanban.com"
@@ -54,8 +56,8 @@ echo "🔨 Building web app..."
 (cd packages/local-web && npm run build)
 
 echo "🔨 Building Rust binaries..."
-cargo build --release --manifest-path Cargo.toml
-cargo build --release --bin vibe-kanban-mcp --manifest-path Cargo.toml
+"$RESOURCE_SAFE_CARGO" build --release --manifest-path Cargo.toml
+"$RESOURCE_SAFE_CARGO" build --release --bin vibe-kanban-mcp --manifest-path Cargo.toml
 
 echo "📦 Creating distribution package..."
 
@@ -113,7 +115,7 @@ if [[ "$1" == "--desktop" || "$1" == "--all" ]]; then
     fs.writeFileSync('$TAURI_CONF', JSON.stringify(conf, null, 2) + '\n');
   "
 
-  cargo tauri build
+  "$RESOURCE_SAFE_CARGO" tauri build
 
   # Restore tauri.conf.json
   git checkout -- "$TAURI_CONF"
