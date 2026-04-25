@@ -3,6 +3,7 @@ use axum::Router;
 use crate::DeploymentImpl;
 
 mod issue_assignees;
+mod issue_comments;
 mod issue_relationships;
 mod issue_tags;
 mod issues;
@@ -15,6 +16,7 @@ mod workspaces;
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .merge(issue_assignees::router())
+        .merge(issue_comments::router())
         .merge(issue_relationships::router())
         .merge(issue_tags::router())
         .merge(issues::router())

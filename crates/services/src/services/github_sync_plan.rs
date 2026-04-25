@@ -1,8 +1,9 @@
-/// Opt-in GitHub → Vibe Kanban sync planning.
+/// Opt-in GitHub → Vibe Kanban sync planning and execution.
 ///
-/// This module is deliberately side-effect-free: it takes a snapshot of GitHub issue
-/// data and the existing Kanban state, then produces a [`SyncPlan`] describing what
-/// mutations *would* need to happen. Callers decide whether/how to execute those ops.
+/// Planning is deliberately side-effect-free: it takes a snapshot of GitHub issue
+/// data and the existing Kanban state, then produces a [`SyncPlan`] describing the
+/// mutations needed. Callers can prepare those ops into remote API requests and pass
+/// them to [`execute_prepared_sync`] to apply the supported Kanban mutations.
 ///
 /// Tracking issue: gavinanelson/implication#171
 ///
@@ -15,8 +16,11 @@ use api_types::{
     CreateIssueCommentRequest, CreateIssueRelationshipRequest, CreateIssueRequest,
     IssueRelationshipType as ApiIssueRelationshipType, UpdateIssueRequest,
 };
+use async_trait::async_trait;
 use serde_json::json;
 use uuid::Uuid;
+
+use super::remote_client::{RemoteClient, RemoteClientError};
 
 // ---------------------------------------------------------------------------
 // GitHub-side types (populated from GitHub REST/GraphQL responses)
@@ -247,6 +251,72 @@ pub enum PreparedSyncAction {
 #[derive(Debug, Clone, Default)]
 pub struct PreparedSync {
     pub actions: Vec<PreparedSyncAction>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecutedSyncSummary {
+    pub created_issues: usize,
+    pub updated_issues: usize,
+    pub created_relationships: usize,
+    pub created_comments: usize,
+    pub skipped_unsupported: usize,
+}
+
+#[async_trait]
+pub trait PreparedSyncExecutor {
+    type Error;
+
+    async fn create_issue(&self, request: &CreateIssueRequest) -> Result<(), Self::Error>;
+    async fn update_issue(
+        &self,
+        issue_id: Uuid,
+        request: &UpdateIssueRequest,
+    ) -> Result<(), Self::Error>;
+    async fn create_issue_relationship(
+        &self,
+        request: &CreateIssueRelationshipRequest,
+    ) -> Result<(), Self::Error>;
+    async fn create_issue_comment(
+        &self,
+        request: &CreateIssueCommentRequest,
+    ) -> Result<(), Self::Error>;
+}
+
+#[async_trait]
+impl PreparedSyncExecutor for RemoteClient {
+    type Error = RemoteClientError;
+
+    async fn create_issue(&self, request: &CreateIssueRequest) -> Result<(), Self::Error> {
+        RemoteClient::create_issue(self, request).await.map(|_| ())
+    }
+
+    async fn update_issue(
+        &self,
+        issue_id: Uuid,
+        request: &UpdateIssueRequest,
+    ) -> Result<(), Self::Error> {
+        RemoteClient::update_issue(self, issue_id, request)
+            .await
+            .map(|_| ())
+    }
+
+    async fn create_issue_relationship(
+        &self,
+        request: &CreateIssueRelationshipRequest,
+    ) -> Result<(), Self::Error> {
+        RemoteClient::create_issue_relationship(self, request)
+            .await
+            .map(|_| ())
+    }
+
+    async fn create_issue_comment(
+        &self,
+        request: &CreateIssueCommentRequest,
+    ) -> Result<(), Self::Error> {
+        RemoteClient::create_issue_comment(self, request)
+            .await
+            .map(|_| ())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +651,42 @@ pub fn prepare_sync_actions(plan: &SyncPlan, options: PrepareSyncOptions) -> Pre
     PreparedSync { actions }
 }
 
+pub async fn execute_prepared_sync<E>(
+    executor: &E,
+    prepared: &PreparedSync,
+) -> Result<ExecutedSyncSummary, E::Error>
+where
+    E: PreparedSyncExecutor + Sync,
+{
+    let mut summary = ExecutedSyncSummary::default();
+
+    for action in &prepared.actions {
+        match action {
+            PreparedSyncAction::CreateIssue(request) => {
+                executor.create_issue(request).await?;
+                summary.created_issues += 1;
+            }
+            PreparedSyncAction::UpdateIssue { issue_id, request } => {
+                executor.update_issue(*issue_id, request).await?;
+                summary.updated_issues += 1;
+            }
+            PreparedSyncAction::CreateIssueRelationship(request) => {
+                executor.create_issue_relationship(request).await?;
+                summary.created_relationships += 1;
+            }
+            PreparedSyncAction::CreateIssueComment(request) => {
+                executor.create_issue_comment(request).await?;
+                summary.created_comments += 1;
+            }
+            PreparedSyncAction::Unsupported(_) => {
+                summary.skipped_unsupported += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
 pub fn format_mirrored_github_comment(
     github_comment_id: u64,
     author_login: &str,
@@ -634,6 +740,8 @@ fn empty_update_issue_request() -> UpdateIssueRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     fn make_uuid(n: u64) -> Uuid {
@@ -664,6 +772,68 @@ mod tests {
             github_issue_number: Some(gh_number),
             title: title.to_string(),
             description: None,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecordedAction {
+        CreateIssue(String),
+        UpdateIssue(Uuid, Option<String>),
+        CreateRelationship(ApiIssueRelationshipType),
+        CreateComment(String),
+    }
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        actions: Mutex<Vec<RecordedAction>>,
+    }
+
+    #[async_trait]
+    impl PreparedSyncExecutor for RecordingExecutor {
+        type Error = &'static str;
+
+        async fn create_issue(&self, request: &CreateIssueRequest) -> Result<(), Self::Error> {
+            self.actions
+                .lock()
+                .map_err(|_| "recording executor poisoned")?
+                .push(RecordedAction::CreateIssue(request.title.clone()));
+            Ok(())
+        }
+
+        async fn update_issue(
+            &self,
+            issue_id: Uuid,
+            request: &UpdateIssueRequest,
+        ) -> Result<(), Self::Error> {
+            self.actions
+                .lock()
+                .map_err(|_| "recording executor poisoned")?
+                .push(RecordedAction::UpdateIssue(issue_id, request.title.clone()));
+            Ok(())
+        }
+
+        async fn create_issue_relationship(
+            &self,
+            request: &CreateIssueRelationshipRequest,
+        ) -> Result<(), Self::Error> {
+            self.actions
+                .lock()
+                .map_err(|_| "recording executor poisoned")?
+                .push(RecordedAction::CreateRelationship(
+                    request.relationship_type,
+                ));
+            Ok(())
+        }
+
+        async fn create_issue_comment(
+            &self,
+            request: &CreateIssueCommentRequest,
+        ) -> Result<(), Self::Error> {
+            self.actions
+                .lock()
+                .map_err(|_| "recording executor poisoned")?
+                .push(RecordedAction::CreateComment(request.message.clone()));
+            Ok(())
         }
     }
 
@@ -1100,6 +1270,88 @@ mod tests {
                 if request.message.contains("vibe-kanban-github-comment-id:2222")
                     && request.message.contains("@octocat")
         )));
+    }
+
+    #[tokio::test]
+    async fn executes_prepared_sync_against_mutation_surface() {
+        let issue_id = make_uuid(2000);
+        let project_id = make_uuid(2001);
+        let status_id = make_uuid(2002);
+        let prepared = PreparedSync {
+            actions: vec![
+                PreparedSyncAction::CreateIssue(CreateIssueRequest {
+                    id: Some(issue_id),
+                    project_id,
+                    status_id,
+                    title: "GitHub issue".into(),
+                    description: None,
+                    priority: None,
+                    start_date: None,
+                    target_date: None,
+                    completed_at: None,
+                    sort_order: 0.0,
+                    parent_issue_id: None,
+                    parent_issue_sort_order: None,
+                    extension_metadata: github_extension_metadata(
+                        200,
+                        "https://github.com/owner/repo/issues/200",
+                    ),
+                }),
+                PreparedSyncAction::UpdateIssue {
+                    issue_id,
+                    request: UpdateIssueRequest {
+                        title: Some("Renamed from GitHub".into()),
+                        ..empty_update_issue_request()
+                    },
+                },
+                PreparedSyncAction::CreateIssueRelationship(CreateIssueRelationshipRequest {
+                    id: None,
+                    issue_id,
+                    related_issue_id: make_uuid(2003),
+                    relationship_type: ApiIssueRelationshipType::Blocking,
+                }),
+                PreparedSyncAction::CreateIssueComment(CreateIssueCommentRequest {
+                    id: None,
+                    issue_id,
+                    message: format_mirrored_github_comment(1234, "octocat", "Kanban update"),
+                    parent_id: None,
+                }),
+                PreparedSyncAction::Unsupported(UnsupportedSyncItem::Tags {
+                    kanban_id: issue_id,
+                    tag_name: "p1".into(),
+                    reason: "not implemented".into(),
+                }),
+            ],
+        };
+        let executor = RecordingExecutor::default();
+
+        let summary = execute_prepared_sync(&executor, &prepared)
+            .await
+            .expect("executor should apply all supported actions");
+
+        assert_eq!(
+            summary,
+            ExecutedSyncSummary {
+                created_issues: 1,
+                updated_issues: 1,
+                created_relationships: 1,
+                created_comments: 1,
+                skipped_unsupported: 1,
+            }
+        );
+        assert_eq!(
+            *executor.actions.lock().expect("recorded actions"),
+            vec![
+                RecordedAction::CreateIssue("GitHub issue".into()),
+                RecordedAction::UpdateIssue(issue_id, Some("Renamed from GitHub".into())),
+                RecordedAction::CreateRelationship(ApiIssueRelationshipType::Blocking),
+                RecordedAction::CreateComment(format_mirrored_github_comment(
+                    1234,
+                    "octocat",
+                    "Kanban update"
+                )),
+            ]
+        );
     }
 
     #[test]
