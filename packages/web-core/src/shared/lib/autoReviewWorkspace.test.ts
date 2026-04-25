@@ -1,7 +1,10 @@
 import { describe, it } from 'node:test';
-import { equal } from 'node:assert/strict';
+import { deepEqual, equal } from 'node:assert/strict';
 
-import { getAutoReviewLocalWorkspaceId } from './autoReviewWorkspace';
+import {
+  getAutoReviewLocalWorkspaceId,
+  getAutoReviewWorkspaceResolution,
+} from './autoReviewWorkspace.ts';
 
 describe('getAutoReviewLocalWorkspaceId', () => {
   it('selects the first non-archived linked workspace in the local context', () => {
@@ -39,6 +42,46 @@ describe('getAutoReviewLocalWorkspaceId', () => {
         new Map([['local-workspace', {}]])
       ),
       null
+    );
+  });
+});
+
+describe('getAutoReviewWorkspaceResolution', () => {
+  it('returns pending-local-workspace when a linked local workspace is not loaded yet', () => {
+    deepEqual(
+      getAutoReviewWorkspaceResolution(
+        [
+          {
+            archived: false,
+            local_workspace_id: 'local-workspace',
+          },
+        ],
+        new Map()
+      ),
+      {
+        state: 'pending-local-workspace',
+      }
+    );
+  });
+
+  it('returns no-linked-workspace when no non-archived workspace has a local id', () => {
+    deepEqual(
+      getAutoReviewWorkspaceResolution(
+        [
+          {
+            archived: false,
+            local_workspace_id: null,
+          },
+          {
+            archived: true,
+            local_workspace_id: 'archived-local-workspace',
+          },
+        ],
+        new Map([['archived-local-workspace', {}]])
+      ),
+      {
+        state: 'no-linked-workspace',
+      }
     );
   });
 });

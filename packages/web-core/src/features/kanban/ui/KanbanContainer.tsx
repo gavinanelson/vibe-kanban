@@ -87,7 +87,7 @@ import {
   type PendingAutoReview,
 } from '@/shared/lib/autoReviewStatus';
 import { getAutoReviewTransitionIssueIds } from '@/shared/lib/autoReviewTransitions';
-import { getAutoReviewLocalWorkspaceId } from '@/shared/lib/autoReviewWorkspace';
+import { getAutoReviewWorkspaceResolution } from '@/shared/lib/autoReviewWorkspace';
 
 const areStringSetsEqual = (left: string[], right: string[]): boolean => {
   if (left.length !== right.length) {
@@ -698,11 +698,16 @@ export function KanbanContainer() {
       }
 
       const hostId = effectiveHostId;
-      const localWorkspaceId = getAutoReviewLocalWorkspaceId(
+      const workspaceResolution = getAutoReviewWorkspaceResolution(
         getWorkspacesForIssue(issueId),
         localWorkspacesById
       );
-      if (!localWorkspaceId) {
+      if (workspaceResolution.state === 'pending-local-workspace') {
+        pendingAutoReviewIssueIdsRef.current.add(issueId);
+        return;
+      }
+
+      if (workspaceResolution.state === 'no-linked-workspace') {
         console.warn(
           'Skipping auto-review: issue has no linked local workspace',
           {
@@ -712,6 +717,7 @@ export function KanbanContainer() {
         return;
       }
 
+      const localWorkspaceId = workspaceResolution.localWorkspaceId;
       const transitionKey = `${issueId}:${localWorkspaceId}`;
       if (autoReviewTransitionsRef.current.has(transitionKey)) {
         return;
