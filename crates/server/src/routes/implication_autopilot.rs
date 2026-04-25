@@ -15,7 +15,8 @@ use db::models::{
 use deployment::Deployment;
 use executors::{
     actions::{
-        ExecutorAction, ExecutorActionType, coding_agent_initial::CodingAgentInitialRequest,
+        ExecutorAction, ExecutorActionType,
+        coding_agent_initial::CodingAgentInitialRequest,
         review::{RepoReviewContext as ExecutorRepoReviewContext, ReviewRequest as ReviewAction},
     },
     executors::{BaseCodingAgent, build_review_prompt},
@@ -209,8 +210,8 @@ async fn start_auto_review(
         .container()
         .ensure_container_exists(&workspace)
         .await?;
-    let context = build_autopilot_review_context(&deployment, &workspace, container_ref.as_str())
-        .await?;
+    let context =
+        build_autopilot_review_context(&deployment, &workspace, container_ref.as_str()).await?;
     let executor_config = default_codex_config();
     let prompt = build_review_prompt(context.as_deref(), Some(REVIEW_PROMPT));
     let action = ExecutorAction::new(
@@ -361,11 +362,11 @@ async fn build_autopilot_review_context(
     let mut contexts = Vec::new();
     for repo in repos {
         let worktree_path = workspace_path.join(&repo.repo.name);
-        if let Ok(base_commit) = deployment.git().get_fork_point(
-            &worktree_path,
-            &repo.target_branch,
-            &workspace.branch,
-        ) {
+        if let Ok(base_commit) =
+            deployment
+                .git()
+                .get_fork_point(&worktree_path, &repo.target_branch, &workspace.branch)
+        {
             contexts.push(ExecutorRepoReviewContext {
                 repo_id: repo.repo.id,
                 repo_name: repo.repo.display_name,
@@ -1041,7 +1042,10 @@ mod tests {
         assert!(is_auto_review_session(Some(
             "Auto review rerun - Codex (medium)"
         )));
-        assert_eq!(auto_review_session_name(false), "Auto review - Codex (medium)");
+        assert_eq!(
+            auto_review_session_name(false),
+            "Auto review - Codex (medium)"
+        );
         assert_eq!(
             auto_review_session_name(true),
             "Auto review rerun - Codex (medium)"
@@ -1049,9 +1053,11 @@ mod tests {
         assert_eq!(review_fix_session_name(), "Review fix - Codex (medium)");
         assert!(is_review_fix_session(Some("Review fix - Codex (medium)")));
         assert!(!is_auto_review_session(Some("Review fix - Codex (medium)")));
-        assert!(!review_fix_session_name()
-            .to_ascii_lowercase()
-            .starts_with("auto review"));
+        assert!(
+            !review_fix_session_name()
+                .to_ascii_lowercase()
+                .starts_with("auto review")
+        );
     }
 
     #[test]
