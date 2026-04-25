@@ -55,6 +55,12 @@ aws-lc-sys = "=0.37.0"
 aws-lc-rs = "=1.16.0"
 
 [profile.release]
-debug = 1
-split-debuginfo = "packed"
+# Keep local/native release builds safe on 16GB Linux laptops. The previous
+# `debug = 1` + packed split debuginfo made rustc/link steps push omarchy into
+# swap during Tauri/server release builds. CI or release engineering can opt
+# back into symbols with CARGO_PROFILE_RELEASE_DEBUG=1 when needed.
+debug = 0
+split-debuginfo = "off"
+incremental = false
+codegen-units = 1
 strip = true

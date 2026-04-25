@@ -1,0 +1,110 @@
+---
+title: "Resource-safe Builds"
+description: "Build the Vibe Kanban native app and release binaries without exhausting memory on development machines."
+---
+
+Vibe Kanban release and native desktop builds are memory-heavy Rust builds. Use the repository's resource-safe build path when you build locally, especially on 16 GB laptops or shared development hosts.
+
+<Warning>
+Do not run raw `cargo build --release` or raw `cargo tauri build` on low-memory machines unless you have intentionally opted out of the guardrails. Those commands can start multiple compiler and linker jobs and push the machine into swap.
+</Warning>
+
+## What is protected
+
+The repository applies three layers of protection for local release-style builds:
+
+1. `.cargo/config.toml` sets `jobs = 1` so Cargo serialises compiler work by default.
+2. `Cargo.toml` disables release debug information and split debug information by default.
+3. `scripts/resource-safe-cargo.sh` wraps risky local build commands and prints the effective memory settings before it runs Cargo.
+
+These guardrails target local developer machines. CI or release engineering can override them explicitly when symbols or more parallelism are required.
+
+## Build the native app safely
+
+From the repository root, run:
+
+```bash
+pnpm run tauri:build
+```
+
+That script runs:
+
+```bash
+cd crates/tauri-app && ../../scripts/resource-safe-cargo.sh tauri build
+```
+
+The wrapper detects `cargo tauri build` as a native release build and applies memory-safe defaults.
+
+## Build a Rust release target safely
+
+For a direct release build, call the wrapper instead of calling Cargo directly:
+
+```bash
+./scripts/resource-safe-cargo.sh build --release -p vibe-kanban-tauri
+```
+
+Expected output includes the active guardrail settings:
+
+```text
+resource-safe cargo: enabled for release/native build
+  CARGO_BUILD_JOBS=1
+  CARGO_INCREMENTAL=0
+  CARGO_PROFILE_RELEASE_DEBUG=0
+  CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
+  RUSTFLAGS=-C debuginfo=0
+```
+
+## Override the defaults intentionally
+
+The wrapper preserves settings that you export before invoking it. Use this only when you know the machine has enough memory for the requested build.
+
+```bash
+CARGO_BUILD_JOBS=4 ./scripts/resource-safe-cargo.sh build --release -p vibe-kanban-tauri
+```
+
+To disable the wrapper's release/native guard entirely for one command:
+
+```bash
+VK_CARGO_MEMORY_SAFE=0 ./scripts/resource-safe-cargo.sh build --release -p vibe-kanban-tauri
+```
+
+<Warning>
+`VK_CARGO_MEMORY_SAFE=0` disables the wrapper defaults only. The repository-level `.cargo/config.toml` still serialises Cargo unless you also override Cargo's job count.
+</Warning>
+
+## Troubleshoot high memory during builds
+
+If a build still makes the machine unresponsive:
+
+1. Stop duplicate or stale builds before starting another one.
+
+   ```bash
+   pkill -f 'cargo tauri build' || true
+   pkill -f 'cargo build --release' || true
+   pkill -f rustc || true
+   ```
+
+2. Confirm the safe route is being used.
+
+   ```bash
+   pnpm run tauri:build
+   ```
+
+   You should see `resource-safe cargo: enabled for release/native build` before Cargo starts.
+
+3. Check for an intentional override in your shell or service environment.
+
+   ```bash
+   env | grep -E '^(VK_CARGO_MEMORY_SAFE|CARGO_BUILD_JOBS|CARGO_PROFILE_RELEASE_DEBUG|CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO|RUSTFLAGS)='
+   ```
+
+4. Retry with the default wrapper settings after removing any overrides.
+
+   ```bash
+   unset VK_CARGO_MEMORY_SAFE CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_PROFILE_RELEASE_DEBUG CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO RUSTFLAGS
+   pnpm run tauri:build
+   ```
+
+## When to bypass the safe path
+
+Bypass the safe path only for a deliberate release-engineering task, such as producing debug-symbol artefacts for crash analysis. In that case, run the build on a machine with enough RAM, document the override in the release notes, and avoid doing it on an active laptop session.

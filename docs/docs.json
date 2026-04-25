@@ -104,6 +104,7 @@
         "group": "Self-Hosting",
         "pages": [
           "self-hosting/local-development",
+          "self-hosting/resource-safe-builds",
           "self-hosting/deploy-docker"
         ]
       },
