@@ -60,14 +60,6 @@ export function HostIdScopeProvider({
   hostId: string | null;
   children: ReactNode;
 }) {
-  useLayoutEffect(() => {
-    const previousHostId = _hostId;
-    _hostId = hostId;
-    return () => {
-      _hostId = previousHostId;
-    };
-  }, [hostId]);
-
   return (
     <HostIdContext.Provider value={hostId}>{children}</HostIdContext.Provider>
   );

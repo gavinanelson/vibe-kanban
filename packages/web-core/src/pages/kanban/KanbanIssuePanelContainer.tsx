@@ -1307,6 +1307,13 @@ export function KanbanIssuePanelContainer({
     }
   }, [selectedKanbanIssueId, selectedIssue, effectiveHostId, updateIssue]);
 
+  const handleOpenImplicationMergeHandoff = useCallback(() => {
+    const handoffUrl =
+      linkedGitHubIssue?.latestPrUrl ?? linkedGitHubIssue?.issueUrl;
+    if (!handoffUrl) return;
+    window.open(handoffUrl, '_blank', 'noopener,noreferrer');
+  }, [linkedGitHubIssue]);
+
   // Loading state
   const isLoading = projectLoading || orgLoading;
   const isResolvingExpectedIssue =
@@ -1391,6 +1398,13 @@ export function KanbanIssuePanelContainer({
           : undefined
       }
       isStartingImplicationReviewFix={startReviewFixMutation.isPending}
+      onOpenImplicationMergeHandoff={
+        shouldShowImplicationAutopilot &&
+        implicationAutopilotPanelStatus?.nextAction === 'ready_for_merge' &&
+        (linkedGitHubIssue?.latestPrUrl || linkedGitHubIssue?.issueUrl)
+          ? handleOpenImplicationMergeHandoff
+          : undefined
+      }
       onClose={closeKanbanIssuePanel}
       onSubmit={handleSubmit}
       onCmdEnterSubmit={handleCmdEnterSubmit}

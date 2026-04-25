@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -8,12 +10,13 @@ use db::models::{
     execution_process::{ExecutionProcessRunReason, ExecutionProcessStatus},
     session::{CreateSession, Session},
     workspace::{Workspace, WorkspaceError},
+    workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
 use executors::{
     actions::{
         ExecutorAction, ExecutorActionType, coding_agent_initial::CodingAgentInitialRequest,
-        review::ReviewRequest as ReviewAction,
+        review::{RepoReviewContext as ExecutorRepoReviewContext, ReviewRequest as ReviewAction},
     },
     executors::{BaseCodingAgent, build_review_prompt},
     model_selector::PermissionPolicy,
@@ -195,11 +198,7 @@ async fn start_auto_review(
         &deployment.db().pool,
         &CreateSession {
             executor: Some("CODEX".to_string()),
-            name: Some(format!(
-                "Auto review{} - Codex ({})",
-                if payload.rerun { " rerun" } else { "" },
-                DEFAULT_CODEX_REASONING
-            )),
+            name: Some(auto_review_session_name(payload.rerun)),
         },
         Uuid::new_v4(),
         workspace.id,
@@ -210,13 +209,14 @@ async fn start_auto_review(
         .container()
         .ensure_container_exists(&workspace)
         .await?;
-    let _ = container_ref;
+    let context = build_autopilot_review_context(&deployment, &workspace, container_ref.as_str())
+        .await?;
     let executor_config = default_codex_config();
-    let prompt = build_review_prompt(None, Some(REVIEW_PROMPT));
+    let prompt = build_review_prompt(context.as_deref(), Some(REVIEW_PROMPT));
     let action = ExecutorAction::new(
         ExecutorActionType::ReviewRequest(ReviewAction {
             executor_config,
-            context: None,
+            context,
             prompt,
             session_id: None,
             working_dir: session.agent_working_dir.clone(),
@@ -293,10 +293,7 @@ async fn start_review_fix(
         &deployment.db().pool,
         &CreateSession {
             executor: Some("CODEX".to_string()),
-            name: Some(format!(
-                "Auto review fix - Codex ({})",
-                DEFAULT_CODEX_REASONING
-            )),
+            name: Some(review_fix_session_name()),
         },
         Uuid::new_v4(),
         workspace.id,
@@ -349,6 +346,37 @@ async fn start_review_fix(
     })))
 }
 
+async fn build_autopilot_review_context(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    container_path: &str,
+) -> Result<Option<Vec<ExecutorRepoReviewContext>>, ApiError> {
+    let repos = WorkspaceRepo::find_repos_with_target_branch_for_workspace(
+        &deployment.db().pool,
+        workspace.id,
+    )
+    .await?;
+    let workspace_path = PathBuf::from(container_path);
+
+    let mut contexts = Vec::new();
+    for repo in repos {
+        let worktree_path = workspace_path.join(&repo.repo.name);
+        if let Ok(base_commit) = deployment.git().get_fork_point(
+            &worktree_path,
+            &repo.target_branch,
+            &workspace.branch,
+        ) {
+            contexts.push(ExecutorRepoReviewContext {
+                repo_id: repo.repo.id,
+                repo_name: repo.repo.display_name,
+                base_commit,
+            });
+        }
+    }
+
+    Ok((!contexts.is_empty()).then_some(contexts))
+}
+
 fn ensure_implication_autopilot_allowed(
     workspace: &Workspace,
     github_repo_full_name: Option<&str>,
@@ -372,6 +400,18 @@ fn ensure_implication_autopilot_allowed(
     Err(ApiError::Workspace(WorkspaceError::ValidationError(
         "Implication autopilot is only enabled for gavinanelson/implication issues.".to_string(),
     )))
+}
+
+fn auto_review_session_name(rerun: bool) -> String {
+    format!(
+        "Auto review{} - Codex ({})",
+        if rerun { " rerun" } else { "" },
+        DEFAULT_CODEX_REASONING
+    )
+}
+
+fn review_fix_session_name() -> String {
+    format!("Review fix - Codex ({DEFAULT_CODEX_REASONING})")
 }
 
 fn default_codex_config() -> ExecutorConfig {
@@ -1001,19 +1041,24 @@ mod tests {
         assert!(is_auto_review_session(Some(
             "Auto review rerun - Codex (medium)"
         )));
-        assert!(is_review_fix_session(Some(
-            "Auto review fix - Codex (medium)"
-        )));
-        assert!(!is_auto_review_session(Some(
-            "Auto review fix - Codex (medium)"
-        )));
+        assert_eq!(auto_review_session_name(false), "Auto review - Codex (medium)");
+        assert_eq!(
+            auto_review_session_name(true),
+            "Auto review rerun - Codex (medium)"
+        );
+        assert_eq!(review_fix_session_name(), "Review fix - Codex (medium)");
+        assert!(is_review_fix_session(Some("Review fix - Codex (medium)")));
+        assert!(!is_auto_review_session(Some("Review fix - Codex (medium)")));
+        assert!(!review_fix_session_name()
+            .to_ascii_lowercase()
+            .starts_with("auto review"));
     }
 
     #[test]
     fn running_review_fix_is_not_a_running_auto_review_attempt() {
         let completed_review = completed_process("Auto review - Codex (medium)", 0);
         let running_review_fix = process(
-            "Auto review fix - Codex (medium)",
+            "Review fix - Codex (medium)",
             ExecutionProcessStatus::Running,
             None,
         );
@@ -1151,7 +1196,7 @@ mod tests {
     #[test]
     fn action_gating_requires_explicit_rerun_after_review_fix_completes() {
         let implementation = completed_process("Implementation", 0);
-        let review_fix = completed_process("Auto review fix", 0);
+        let review_fix = completed_process("Review fix", 0);
         let workspace = workspace();
 
         assert_eq!(

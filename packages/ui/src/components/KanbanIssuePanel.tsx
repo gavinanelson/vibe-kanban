@@ -147,6 +147,7 @@ export interface KanbanIssuePanelProps {
   isStartingImplicationAutoReview?: boolean;
   onStartImplicationReviewFix?: () => void;
   isStartingImplicationReviewFix?: boolean;
+  onOpenImplicationMergeHandoff?: () => void;
 
   // Actions
   onClose: () => void;
@@ -237,6 +238,7 @@ export function KanbanIssuePanel({
   isStartingImplicationAutoReview,
   onStartImplicationReviewFix,
   isStartingImplicationReviewFix,
+  onOpenImplicationMergeHandoff,
   onClose,
   onSubmit,
   onCmdEnterSubmit,
@@ -611,11 +613,20 @@ export function KanbanIssuePanel({
                     'ready_for_merge' && (
                     <button
                       type="button"
-                      disabled
-                      className="inline-flex items-center gap-half rounded-sm border border-border px-half py-half text-xs text-low opacity-70"
-                      title="Review passed, but PR merge automation is not wired in this UI slice yet."
+                      onClick={onOpenImplicationMergeHandoff}
+                      disabled={!onOpenImplicationMergeHandoff}
+                      className="inline-flex items-center gap-half rounded-sm border border-success px-half py-half text-xs text-success hover:bg-success/10 disabled:border-border disabled:text-low disabled:opacity-70"
+                      title={
+                        onOpenImplicationMergeHandoff
+                          ? 'Open the linked PR for manual merge handoff.'
+                          : 'Review passed. Open the workspace Git controls or linked PR to merge manually.'
+                      }
                     >
-                      Merge pending
+                      <ArrowSquareOutIcon
+                        className="size-icon-xs"
+                        weight="bold"
+                      />
+                      Ready to merge
                     </button>
                   )}
                 </div>

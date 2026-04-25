@@ -96,6 +96,7 @@ fn generate_types_content() -> String {
         server::routes::implication_autopilot::AutopilotProcessSummary::decl(),
         server::routes::implication_autopilot::ImplicationAutopilotStatus::decl(),
         server::routes::implication_autopilot::StartAutopilotReviewRequest::decl(),
+        server::routes::implication_autopilot::StartAutopilotReviewFixRequest::decl(),
         server::routes::tags::TagSearchParams::decl(),
         server::routes::oauth::TokenResponse::decl(),
         server::routes::config::UserSystemInfo::decl(),

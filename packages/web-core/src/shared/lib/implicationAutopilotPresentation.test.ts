@@ -20,6 +20,14 @@ describe('implication autopilot presentation', () => {
         description: 'Requested changes are being handled by a Codex fix session.',
       }
     );
+
+    expect(getImplicationAutopilotNextActionDisplay('ready_for_merge')).toEqual(
+      {
+        label: 'Ready for merge',
+        description:
+          'Auto-review passed; open the PR and complete the merge handoff.',
+      }
+    );
   });
 
   it('keeps unknown status values readable without losing the raw signal', () => {

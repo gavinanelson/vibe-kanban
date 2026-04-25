@@ -35,7 +35,7 @@ const NEXT_ACTION_DISPLAY: Record<
   },
   ready_for_merge: {
     label: 'Ready for merge',
-    description: 'Auto-review passed; complete the PR merge handoff.',
+    description: 'Auto-review passed; open the PR and complete the merge handoff.',
   },
   merge_wait: {
     label: 'Merge in progress',
