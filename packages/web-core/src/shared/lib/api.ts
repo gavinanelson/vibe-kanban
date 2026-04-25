@@ -214,6 +214,15 @@ export interface ImplicationAutopilotProcessSummary {
   completed_at?: string | null;
 }
 
+export type ImplicationAutopilotStartReviewRequest = {
+  rerun?: boolean;
+  github_repo_full_name?: string | null;
+};
+
+export type ImplicationAutopilotStartReviewFixRequest = {
+  github_repo_full_name?: string | null;
+};
+
 export interface ImplicationAutopilotStatus {
   workspace_id: string;
   workspace_name?: string | null;
@@ -1701,14 +1710,18 @@ export const implicationAutopilotApi = {
   startReview: async (
     workspaceId: string,
     hostId?: string | null,
-    opts?: { rerun?: boolean }
+    opts: ImplicationAutopilotStartReviewRequest = {}
   ): Promise<ImplicationAutopilotProcessSummary> => {
     const response = await makeHostAwareRequest(
       `/api/workspaces/${workspaceId}/implication-autopilot/review`,
       hostId,
       {
         method: 'POST',
-        body: JSON.stringify({ rerun: opts?.rerun ?? false }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rerun: opts.rerun ?? false,
+          github_repo_full_name: opts.github_repo_full_name ?? null,
+        }),
       }
     );
     return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
@@ -1716,13 +1729,16 @@ export const implicationAutopilotApi = {
 
   startReviewFix: async (
     workspaceId: string,
-    hostId?: string | null
+    hostId?: string | null,
+    payload: ImplicationAutopilotStartReviewFixRequest = {}
   ): Promise<ImplicationAutopilotProcessSummary> => {
     const response = await makeHostAwareRequest(
       `/api/workspaces/${workspaceId}/implication-autopilot/review-fix`,
       hostId,
       {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       }
     );
     return handleApiResponse<ImplicationAutopilotProcessSummary>(response);

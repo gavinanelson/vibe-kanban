@@ -97,6 +97,12 @@ pub struct ImplicationAutopilotStatus {
 pub struct StartAutopilotReviewRequest {
     #[serde(default)]
     pub rerun: bool,
+    pub github_repo_full_name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct StartAutopilotReviewFixRequest {
+    pub github_repo_full_name: Option<String>,
 }
 
 #[derive(Debug, FromRow, Clone)]
@@ -146,6 +152,8 @@ async fn start_auto_review(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<StartAutopilotReviewRequest>,
 ) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
+    ensure_implication_autopilot_allowed(&workspace, payload.github_repo_full_name.as_deref())?;
+
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
         workspace.id,
@@ -243,7 +251,10 @@ async fn start_auto_review(
 async fn start_review_fix(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<StartAutopilotReviewFixRequest>,
 ) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
+    ensure_implication_autopilot_allowed(&workspace, payload.github_repo_full_name.as_deref())?;
+
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
         workspace.id,
@@ -336,6 +347,31 @@ async fn start_review_fix(
             .completed_at
             .map(|dt: DateTime<Utc>| dt.to_rfc3339()),
     })))
+}
+
+fn ensure_implication_autopilot_allowed(
+    workspace: &Workspace,
+    github_repo_full_name: Option<&str>,
+) -> Result<(), ApiError> {
+    if workspace.task_id.is_none() {
+        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+            "Implication autopilot requires a linked board issue.".to_string(),
+        )));
+    }
+
+    let Some(repo) = github_repo_full_name else {
+        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+            "Implication autopilot requires a linked GitHub issue repo.".to_string(),
+        )));
+    };
+
+    if repo.trim().eq_ignore_ascii_case("gavinanelson/implication") {
+        return Ok(());
+    }
+
+    Err(ApiError::Workspace(WorkspaceError::ValidationError(
+        "Implication autopilot is only enabled for gavinanelson/implication issues.".to_string(),
+    )))
 }
 
 fn default_codex_config() -> ExecutorConfig {
@@ -442,10 +478,14 @@ fn process_summary(row: &ProcessRow) -> AutopilotProcessSummary {
 }
 
 fn is_auto_review_session(name: Option<&str>) -> bool {
-    name.unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("auto review")
+    let normalized = name.unwrap_or_default().trim().to_ascii_lowercase();
+    if is_review_fix_session(Some(&normalized)) {
+        return false;
+    }
+
+    normalized == "auto review"
+        || normalized.starts_with("auto review -")
+        || normalized.starts_with("auto review rerun -")
 }
 
 fn is_review_fix_session(name: Option<&str>) -> bool {
@@ -909,7 +949,7 @@ mod tests {
         let now = Utc::now();
         Workspace {
             id: Uuid::new_v4(),
-            task_id: None,
+            task_id: Some(Uuid::new_v4()),
             container_ref: None,
             branch: "issue-264".to_string(),
             setup_completed_at: Some(now),
@@ -953,6 +993,40 @@ mod tests {
             running_review_attempt(&reviews).map(|row| row.id),
             Some(running.id)
         );
+    }
+
+    #[test]
+    fn review_fix_sessions_are_not_auto_review_sessions() {
+        assert!(is_auto_review_session(Some("Auto review - Codex (medium)")));
+        assert!(is_auto_review_session(Some(
+            "Auto review rerun - Codex (medium)"
+        )));
+        assert!(is_review_fix_session(Some(
+            "Auto review fix - Codex (medium)"
+        )));
+        assert!(!is_auto_review_session(Some(
+            "Auto review fix - Codex (medium)"
+        )));
+    }
+
+    #[test]
+    fn running_review_fix_is_not_a_running_auto_review_attempt() {
+        let completed_review = completed_process("Auto review - Codex (medium)", 0);
+        let running_review_fix = process(
+            "Auto review fix - Codex (medium)",
+            ExecutionProcessStatus::Running,
+            None,
+        );
+        let rows = [&running_review_fix, &completed_review];
+        let review_processes = rows
+            .iter()
+            .copied()
+            .filter(|row| is_auto_review_session(row.session_name.as_deref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(review_processes.len(), 1);
+        assert_eq!(review_processes[0].id, completed_review.id);
+        assert!(running_review_attempt(&review_processes).is_none());
     }
 
     #[test]
@@ -1033,6 +1107,26 @@ mod tests {
                 None
             ),
             Err("Review fix can only start after auto-review requests changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn eligibility_requires_implication_repo_and_linked_issue() {
+        let mut workspace = workspace();
+        assert!(
+            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/implication"))
+                .is_ok()
+        );
+
+        assert!(
+            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/vibe-kanban"))
+                .is_err()
+        );
+
+        workspace.task_id = None;
+        assert!(
+            ensure_implication_autopilot_allowed(&workspace, Some("gavinanelson/implication"))
+                .is_err()
         );
     }
 

@@ -76,6 +76,7 @@ import {
   formatImplicationAutopilotValue,
   getImplicationAutopilotNextActionDisplay,
 } from '@/shared/lib/implicationAutopilotPresentation';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 
 interface KanbanIssuePanelContainerProps {
   issueResolution: 'resolving' | 'ready' | 'missing' | null;
@@ -95,6 +96,8 @@ export function KanbanIssuePanelContainer({
   const appNavigation = useAppNavigation();
   const queryClient = useQueryClient();
   const routeState = useCurrentKanbanRouteState();
+  const currentHostId = useHostId();
+  const effectiveHostId = routeState.hostId ?? currentHostId;
 
   const { openWorkspaceCreateFromState } = useProjectWorkspaceCreateDraft();
   const { workspaces } = useUserContext();
@@ -287,19 +290,28 @@ export function KanbanIssuePanelContainer({
     return candidates[0]?.local_workspace_id ?? null;
   }, [mode, projectWorkspaces, selectedKanbanIssueId]);
 
+  const selectedIssueGitHubLink = useMemo(
+    () =>
+      mode === 'edit' && selectedIssue
+        ? getGitHubIssueLink(selectedIssue.extension_metadata)
+        : null,
+    [mode, selectedIssue]
+  );
+
   const shouldShowImplicationAutopilot = useMemo(() => {
     if (mode !== 'edit' || !selectedIssue) return false;
-    const githubLink = getGitHubIssueLink(selectedIssue.extension_metadata);
-    return githubLink?.repo_full_name === 'gavinanelson/implication';
-  }, [mode, selectedIssue]);
+    return (
+      selectedIssueGitHubLink?.repo_full_name === 'gavinanelson/implication'
+    );
+  }, [mode, selectedIssue, selectedIssueGitHubLink]);
 
   const autopilotQueryKey = useMemo(
     () => [
       'implication-autopilot-status',
-      routeState.hostId,
+      effectiveHostId,
       selectedIssueLocalWorkspaceId,
     ],
-    [routeState.hostId, selectedIssueLocalWorkspaceId]
+    [effectiveHostId, selectedIssueLocalWorkspaceId]
   );
 
   const autopilotStatusQuery = useQuery({
@@ -309,7 +321,7 @@ export function KanbanIssuePanelContainer({
     queryFn: () =>
       implicationAutopilotApi.getStatus(
         selectedIssueLocalWorkspaceId!,
-        routeState.hostId
+        effectiveHostId
       ),
   });
 
@@ -317,11 +329,13 @@ export function KanbanIssuePanelContainer({
     mutationFn: () =>
       implicationAutopilotApi.startReview(
         selectedIssueLocalWorkspaceId!,
-        routeState.hostId,
+        effectiveHostId,
         {
           rerun:
             autopilotStatusQuery.data?.latest_review_decision ===
             'request_changes',
+          github_repo_full_name:
+            selectedIssueGitHubLink?.repo_full_name ?? null,
         }
       ),
     onSuccess: () => {
@@ -338,7 +352,11 @@ export function KanbanIssuePanelContainer({
     mutationFn: () =>
       implicationAutopilotApi.startReviewFix(
         selectedIssueLocalWorkspaceId!,
-        routeState.hostId
+        effectiveHostId,
+        {
+          github_repo_full_name:
+            selectedIssueGitHubLink?.repo_full_name ?? null,
+        }
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: autopilotQueryKey });
@@ -381,9 +399,7 @@ export function KanbanIssuePanelContainer({
       implementationState: formatImplicationAutopilotValue(
         data.implementation_state
       ),
-      autoReviewState: formatImplicationAutopilotValue(
-        data.auto_review_state
-      ),
+      autoReviewState: formatImplicationAutopilotValue(data.auto_review_state),
       latestReviewDecision: formatImplicationAutopilotValue(
         data.latest_review_decision
       ),
@@ -1226,7 +1242,7 @@ export function KanbanIssuePanelContainer({
     if (mode === 'create') {
       const result = await LinkGitHubIssueDialog.show({
         projectId,
-        hostId: routeState.hostId,
+        hostId: effectiveHostId,
         initialRepo:
           kanbanCreateGitHubIssueLink?.repo_full_name ?? defaultGitHubRepo,
         initialLink: kanbanCreateGitHubIssueLink,
@@ -1244,7 +1260,7 @@ export function KanbanIssuePanelContainer({
     await LinkGitHubIssueDialog.show({
       projectId,
       issueId: selectedKanbanIssueId,
-      hostId: routeState.hostId,
+      hostId: effectiveHostId,
       initialRepo: linkedGitHubIssue?.repoFullName ?? defaultGitHubRepo,
       initialLink: getGitHubIssueLink(
         selectedIssue?.extension_metadata ?? null
@@ -1252,7 +1268,7 @@ export function KanbanIssuePanelContainer({
     });
   }, [
     projectId,
-    routeState.hostId,
+    effectiveHostId,
     linkedGitHubIssue?.repoFullName,
     defaultGitHubRepo,
     mode,
@@ -1273,7 +1289,7 @@ export function KanbanIssuePanelContainer({
       const summary = await githubIssuesApi.get(
         currentLink.repo_full_name,
         currentLink.issue_number,
-        routeState.hostId
+        effectiveHostId
       );
       const refreshedLink = {
         ...currentLink,
@@ -1289,7 +1305,7 @@ export function KanbanIssuePanelContainer({
     } finally {
       setIsRefreshingGitHubIssue(false);
     }
-  }, [selectedKanbanIssueId, selectedIssue, routeState.hostId, updateIssue]);
+  }, [selectedKanbanIssueId, selectedIssue, effectiveHostId, updateIssue]);
 
   // Loading state
   const isLoading = projectLoading || orgLoading;
