@@ -69,6 +69,7 @@ import { CreatePRDialog } from '@/shared/dialogs/command-bar/CreatePRDialog';
 import { getIdeName } from '@/shared/lib/ideName';
 import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelectionDialog';
 import { StartReviewDialog } from '@/shared/dialogs/command-bar/StartReviewDialog';
+import { LinkGitHubIssueDialog } from '@/shared/dialogs/command-bar/LinkGitHubIssueDialog';
 import posthog from 'posthog-js';
 import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
 import { SettingsDialog } from '@/shared/dialogs/settings/SettingsDialog';
@@ -1407,6 +1408,27 @@ export const Actions = {
       if (issueIds.length === 1) {
         await ctx.openWorkspaceSelection(projectId, issueIds[0]);
       }
+    },
+  } satisfies IssueActionDefinition,
+
+  LinkGitHubIssue: {
+    id: 'link-github-issue',
+    label: 'Link GitHub Issue',
+    icon: LinkIcon,
+    shortcut: 'I G',
+    requiresTarget: ActionTargetType.ISSUE,
+    isVisible: (ctx) =>
+      ctx.layoutMode === 'kanban' && ctx.hasSelectedKanbanIssue,
+    execute: async (ctx, projectId, issueIds) => {
+      if (issueIds.length !== 1) {
+        throw new Error('Can only link one issue at a time');
+      }
+
+      await LinkGitHubIssueDialog.show({
+        projectId,
+        issueId: issueIds[0],
+        hostId: ctx.currentHostId,
+      });
     },
   } satisfies IssueActionDefinition,
 

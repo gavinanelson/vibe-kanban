@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { create } from 'zustand';
 import type { IssuePriority } from 'shared/remote-types';
+import type { GitHubIssueLink } from '@/shared/lib/githubIssueLink';
 
 export interface ProjectIssueCreateOptions {
   statusId?: string;
@@ -18,6 +19,7 @@ export interface KanbanIssueComposerDraft {
   tagIds?: string[];
   createDraftWorkspace?: boolean;
   parentIssueId?: string;
+  githubIssueLink?: GitHubIssueLink | null;
 }
 
 export interface KanbanIssueComposerEntry {
@@ -57,6 +59,9 @@ function normalizeComposerDraft(
       ? { createDraftWorkspace: draft.createDraftWorkspace }
       : {}),
     ...(draft.parentIssueId ? { parentIssueId: draft.parentIssueId } : {}),
+    ...(draft.githubIssueLink !== undefined
+      ? { githubIssueLink: draft.githubIssueLink }
+      : {}),
   };
 }
 

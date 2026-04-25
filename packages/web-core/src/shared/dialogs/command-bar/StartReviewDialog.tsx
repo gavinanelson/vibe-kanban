@@ -25,6 +25,9 @@ import { create, useModal } from '@ebay/nice-modal-react';
 import { defineModal } from '@/shared/lib/modals';
 import type { BaseCodingAgent, ExecutorProfileId } from 'shared/types';
 
+const IMPLICATION_AUTOPILOT_CODEX_MODEL = 'gpt-5.5';
+const IMPLICATION_AUTOPILOT_CODEX_REASONING = 'medium';
+
 export interface StartReviewDialogProps {
   sessionId?: string;
   workspaceId: string;
@@ -90,11 +93,14 @@ const StartReviewDialogImpl = create<StartReviewDialogProps>(
         let targetSessionId = resolvedSessionId;
 
         if (createNewSession || !resolvedSessionId) {
-          const session = await sessionsApi.create({
-            workspace_id: workspaceId,
-            executor: effectiveProfile.executor,
-            name: t('startReviewDialog.sessionName'),
-          });
+          const session = await sessionsApi.create(
+            {
+              workspace_id: workspaceId,
+              executor: effectiveProfile.executor,
+              name: t('startReviewDialog.sessionName'),
+            },
+            hostId
+          );
           targetSessionId = session.id;
 
           queryClient.invalidateQueries({
@@ -111,14 +117,24 @@ const StartReviewDialogImpl = create<StartReviewDialogProps>(
         const promptParts = [reviewMarkdown, additionalPrompt].filter(Boolean);
         const combinedPrompt = promptParts.join('\n\n');
 
-        await sessionsApi.startReview(targetSessionId, {
-          executor_config: {
-            executor: effectiveProfile.executor,
-            variant: effectiveProfile.variant,
+        await sessionsApi.startReview(
+          targetSessionId,
+          {
+            executor_config: {
+              executor: effectiveProfile.executor,
+              variant: effectiveProfile.variant,
+              ...(effectiveProfile.executor === 'CODEX'
+                ? {
+                    model_id: IMPLICATION_AUTOPILOT_CODEX_MODEL,
+                    reasoning_id: IMPLICATION_AUTOPILOT_CODEX_REASONING,
+                  }
+                : {}),
+            },
+            additional_prompt: combinedPrompt || null,
+            use_all_workspace_commits: includeGitContext,
           },
-          additional_prompt: combinedPrompt || null,
-          use_all_workspace_commits: includeGitContext,
-        });
+          hostId
+        );
 
         queryClient.invalidateQueries({
           queryKey: ['processes', workspaceId],

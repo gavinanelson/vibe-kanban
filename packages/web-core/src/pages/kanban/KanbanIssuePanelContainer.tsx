@@ -7,6 +7,7 @@ import {
   useMemo,
 } from 'react';
 import { useDropzone } from 'react-dropzone';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type { OrganizationMemberWithProfile } from 'shared/types';
 import type { IssuePriority } from 'shared/remote-types';
@@ -30,6 +31,12 @@ import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { CommandBarDialog } from '@/shared/dialogs/command-bar/CommandBarDialog';
 import { getWorkspaceDefaults } from '@/shared/lib/workspaceDefaults';
 import {
+  createGitHubIssueLinkFromSummary,
+  getGitHubIssueLink,
+  setGitHubIssueLink,
+  type GitHubIssueLink,
+} from '@/shared/lib/githubIssueLink';
+import {
   buildLinkedIssueCreateState,
   buildWorkspaceCreateInitialState,
   buildWorkspaceCreatePrompt,
@@ -47,6 +54,7 @@ import {
   commitIssueAttachments,
   deleteAttachment,
 } from '@/shared/lib/remoteApi';
+import { githubIssuesApi, implicationAutopilotApi } from '@/shared/lib/api';
 import {
   extractAttachmentIds,
   removeAttachmentMarkdownBySource,
@@ -63,6 +71,12 @@ import {
   useKanbanIssueComposer,
   useKanbanIssueComposerStore,
 } from '@/shared/stores/useKanbanIssueComposerStore';
+import { getProjectDefaultGitHubRepo } from '@/shared/lib/projectGitHubDefaults';
+import {
+  formatImplicationAutopilotValue,
+  getImplicationAutopilotNextActionDisplay,
+} from '@/shared/lib/implicationAutopilotPresentation';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 
 interface KanbanIssuePanelContainerProps {
   issueResolution: 'resolving' | 'ready' | 'missing' | null;
@@ -80,7 +94,10 @@ export function KanbanIssuePanelContainer({
 }: KanbanIssuePanelContainerProps) {
   const { t } = useTranslation('common');
   const appNavigation = useAppNavigation();
+  const queryClient = useQueryClient();
   const routeState = useCurrentKanbanRouteState();
+  const currentHostId = useHostId();
+  const effectiveHostId = routeState.hostId ?? currentHostId;
 
   const { openWorkspaceCreateFromState } = useProjectWorkspaceCreateDraft();
   const { workspaces } = useUserContext();
@@ -112,6 +129,7 @@ export function KanbanIssuePanelContainer({
     insertTag,
     getTagsForIssue,
     getPullRequestsForIssue,
+    workspaces: projectWorkspaces,
     isLoading: projectLoading,
   } = useProjectContext();
   const selectedKanbanIssueId = routeState.issueId;
@@ -128,6 +146,8 @@ export function KanbanIssuePanelContainer({
     createComposerInitial?.assigneeIds ?? null;
   const kanbanCreateDefaultParentIssueId =
     createComposerInitial?.parentIssueId ?? null;
+  const kanbanCreateGitHubIssueLink =
+    issueComposer?.draft.githubIssueLink ?? null;
   const createDraftWorkspaceByDefault = useUiPreferencesStore(
     (state) => state.createDraftWorkspaceByDefault
   );
@@ -159,6 +179,7 @@ export function KanbanIssuePanelContainer({
       description?: string | null;
       tagIds?: string[];
       createDraftWorkspace?: boolean;
+      githubIssueLink?: GitHubIssueLink | null;
     }) => {
       if (!kanbanCreateMode || !issueComposerKey) {
         return;
@@ -176,7 +197,19 @@ export function KanbanIssuePanelContainer({
     resetKanbanIssueComposer(issueComposerKey);
   }, [issueComposerKey]);
 
-  const { isLoading: orgLoading, membersWithProfilesById } = useOrgContext();
+  const {
+    isLoading: orgLoading,
+    membersWithProfilesById,
+    getProject,
+  } = useOrgContext();
+  const currentProject = useMemo(
+    () => getProject(projectId),
+    [getProject, projectId]
+  );
+  const defaultGitHubRepo = useMemo(
+    () => getProjectDefaultGitHubRepo(currentProject?.name),
+    [currentProject?.name]
+  );
 
   // Get action methods from actions context
   const { openStatusSelection, openPrioritySelection, openAssigneeSelection } =
@@ -232,6 +265,9 @@ export function KanbanIssuePanelContainer({
     return tagLinks.map((it) => it.tag_id);
   }, [getTagsForIssue, selectedKanbanIssueId]);
 
+  // Determine mode from composer state (create) or issue route (edit).
+  const mode = kanbanCreateMode ? 'create' : 'edit';
+
   // Get linked PRs for the issue
   const linkedPrs = useMemo(() => {
     if (!selectedKanbanIssueId) return [];
@@ -243,8 +279,146 @@ export function KanbanIssuePanelContainer({
     }));
   }, [getPullRequestsForIssue, selectedKanbanIssueId]);
 
-  // Determine mode from composer state (create) or issue route (edit).
-  const mode = kanbanCreateMode ? 'create' : 'edit';
+  const selectedIssueLocalWorkspaceId = useMemo(() => {
+    if (mode === 'create' || !selectedKanbanIssueId) return null;
+    const candidates = projectWorkspaces
+      .filter((workspace) => workspace.issue_id === selectedKanbanIssueId)
+      .filter((workspace) => Boolean(workspace.local_workspace_id))
+      .sort((a, b) =>
+        String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? ''))
+      );
+    return candidates[0]?.local_workspace_id ?? null;
+  }, [mode, projectWorkspaces, selectedKanbanIssueId]);
+
+  const selectedIssueGitHubLink = useMemo(
+    () =>
+      mode === 'edit' && selectedIssue
+        ? getGitHubIssueLink(selectedIssue.extension_metadata)
+        : null,
+    [mode, selectedIssue]
+  );
+
+  const shouldShowImplicationAutopilot = useMemo(() => {
+    if (mode !== 'edit' || !selectedIssue) return false;
+    return (
+      selectedIssueGitHubLink?.repo_full_name === 'gavinanelson/implication'
+    );
+  }, [mode, selectedIssue, selectedIssueGitHubLink]);
+
+  const autopilotQueryKey = useMemo(
+    () => [
+      'implication-autopilot-status',
+      effectiveHostId,
+      selectedIssueLocalWorkspaceId,
+    ],
+    [effectiveHostId, selectedIssueLocalWorkspaceId]
+  );
+
+  const autopilotStatusQuery = useQuery({
+    queryKey: autopilotQueryKey,
+    enabled: shouldShowImplicationAutopilot && !!selectedIssueLocalWorkspaceId,
+    refetchInterval: 10000,
+    queryFn: () =>
+      implicationAutopilotApi.getStatus(
+        selectedIssueLocalWorkspaceId!,
+        effectiveHostId
+      ),
+  });
+
+  const startAutoReviewMutation = useMutation({
+    mutationFn: () =>
+      implicationAutopilotApi.startReview(
+        selectedIssueLocalWorkspaceId!,
+        effectiveHostId,
+        {
+          rerun:
+            autopilotStatusQuery.data?.latest_review_decision ===
+            'request_changes',
+          github_repo_full_name:
+            selectedIssueGitHubLink?.repo_full_name ?? null,
+        }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: autopilotQueryKey });
+      if (selectedIssueLocalWorkspaceId) {
+        queryClient.invalidateQueries({
+          queryKey: ['processes', selectedIssueLocalWorkspaceId],
+        });
+      }
+    },
+  });
+
+  const startReviewFixMutation = useMutation({
+    mutationFn: () =>
+      implicationAutopilotApi.startReviewFix(
+        selectedIssueLocalWorkspaceId!,
+        effectiveHostId,
+        {
+          github_repo_full_name:
+            selectedIssueGitHubLink?.repo_full_name ?? null,
+        }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: autopilotQueryKey });
+      if (selectedIssueLocalWorkspaceId) {
+        queryClient.invalidateQueries({
+          queryKey: ['processes', selectedIssueLocalWorkspaceId],
+        });
+      }
+    },
+  });
+
+  const implicationAutopilotPanelStatus = useMemo(() => {
+    if (!shouldShowImplicationAutopilot) return null;
+    if (!selectedIssueLocalWorkspaceId) {
+      const nextActionDisplay =
+        getImplicationAutopilotNextActionDisplay('no_workspace');
+      return {
+        implementationState: 'Missing',
+        autoReviewState: 'Missing',
+        latestReviewDecision: 'Missing',
+        reviewFixState: 'Not started',
+        prMergeState: 'No workspace',
+        nextAction: 'no_workspace',
+        nextActionLabel: nextActionDisplay.label,
+        nextActionDescription: nextActionDisplay.description,
+        blocker: 'No local workspace is linked to this Implication issue yet.',
+        defaultModel: 'gpt-5.5',
+        defaultReasoning: 'medium',
+        daemonized: false,
+      };
+    }
+
+    const data = autopilotStatusQuery.data;
+    if (!data) return null;
+    const nextActionDisplay = getImplicationAutopilotNextActionDisplay(
+      data.next_action
+    );
+
+    return {
+      implementationState: formatImplicationAutopilotValue(
+        data.implementation_state
+      ),
+      autoReviewState: formatImplicationAutopilotValue(data.auto_review_state),
+      latestReviewDecision: formatImplicationAutopilotValue(
+        data.latest_review_decision
+      ),
+      latestReviewExcerpt: data.latest_review_excerpt,
+      reviewFixState: formatImplicationAutopilotValue(data.review_fix_state),
+      prMergeState: formatImplicationAutopilotValue(data.pr_merge_state),
+      nextAction: data.next_action,
+      nextActionLabel: nextActionDisplay.label,
+      nextActionDescription: nextActionDisplay.description,
+      blocker: data.blocker,
+      defaultModel: data.default_model,
+      defaultReasoning: data.default_reasoning,
+      daemonized: data.daemonized,
+    };
+  }, [
+    shouldShowImplicationAutopilot,
+    selectedIssueLocalWorkspaceId,
+    autopilotStatusQuery.data,
+  ]);
 
   // Sort statuses by sort_order
   const sortedStatuses = useMemo(
@@ -340,12 +514,21 @@ export function KanbanIssuePanelContainer({
   latestDescriptionRef.current = displayData.description ?? null;
 
   const isCreateDraftDirty = useMemo(() => {
-    return selectIsCreateDraftDirty({
-      state: formState,
-      mode,
-      createModeDefaults,
-    });
-  }, [formState, mode, createModeDefaults]);
+    return (
+      selectIsCreateDraftDirty({
+        state: formState,
+        mode,
+        createModeDefaults,
+      }) ||
+      (!!kanbanCreateMode && kanbanCreateGitHubIssueLink !== null)
+    );
+  }, [
+    formState,
+    mode,
+    createModeDefaults,
+    kanbanCreateMode,
+    kanbanCreateGitHubIssueLink,
+  ]);
 
   // Resolve assignee IDs to full profiles for avatar display
   const displayAssigneeUsers = useMemo(() => {
@@ -360,6 +543,7 @@ export function KanbanIssuePanelContainer({
   const [descriptionSaveStatus, setDescriptionSaveStatus] = useState<
     'idle' | 'saved'
   >('idle');
+  const [isRefreshingGitHubIssue, setIsRefreshingGitHubIssue] = useState(false);
 
   // Debounced save for title changes
   const { debounced: debouncedSaveTitle, cancel: cancelDebouncedTitle } =
@@ -581,7 +765,9 @@ export function KanbanIssuePanelContainer({
         useKanbanIssueComposerStore.getState().byKey[issueComposerKey]?.draft;
       const hasSavedDraft =
         composerDraft != null &&
-        (composerDraft.title !== '' || composerDraft.description != null);
+        (composerDraft.title !== '' ||
+          composerDraft.description != null ||
+          composerDraft.githubIssueLink != null);
 
       if (hasSavedDraft) {
         nextCreateFormData = {
@@ -842,7 +1028,9 @@ export function KanbanIssuePanelContainer({
           completed_at: null,
           parent_issue_id: kanbanCreateDefaultParentIssueId,
           parent_issue_sort_order: null,
-          extension_metadata: null,
+          extension_metadata: kanbanCreateGitHubIssueLink
+            ? setGitHubIssueLink(null, kanbanCreateGitHubIssueLink)
+            : null,
         });
 
         // Wait for the issue to be confirmed by the backend and get the synced entity
@@ -895,9 +1083,11 @@ export function KanbanIssuePanelContainer({
         }
 
         if (displayData.createDraftWorkspace) {
+          const githubLink = getGitHubIssueLink(syncedIssue.extension_metadata);
           const initialPrompt = buildWorkspaceCreatePrompt(
             displayData.title,
-            displayData.description
+            displayData.description,
+            githubLink
           );
 
           // Get defaults from most recent workspace
@@ -964,6 +1154,7 @@ export function KanbanIssuePanelContainer({
     hasPendingAttachments,
     onExpectIssueOpen,
     t,
+    kanbanCreateGitHubIssueLink,
   ]);
 
   const handleCmdEnterSubmit = useCallback(() => {
@@ -1021,6 +1212,108 @@ export function KanbanIssuePanelContainer({
     });
   }, [selectedKanbanIssueId, projectId]);
 
+  const linkedGitHubIssue = useMemo(() => {
+    if (mode !== 'edit' || !selectedIssue) {
+      return null;
+    }
+
+    const githubLink = getGitHubIssueLink(selectedIssue.extension_metadata);
+    if (!githubLink) {
+      return null;
+    }
+
+    return {
+      repoFullName: githubLink.repo_full_name,
+      issueNumber: githubLink.issue_number,
+      issueUrl: githubLink.issue_url,
+      state: githubLink.last_seen_state,
+      latestPrNumber: githubLink.latest_pr_number ?? null,
+      latestPrUrl: githubLink.latest_pr_url ?? null,
+      latestAgentCheckpoint: githubLink.latest_agent_checkpoint ?? null,
+    };
+  }, [mode, selectedIssue]);
+
+  const handleManageGitHubIssueLink = useCallback(async () => {
+    if (!projectId) return;
+
+    const { LinkGitHubIssueDialog } = await import(
+      '@/shared/dialogs/command-bar/LinkGitHubIssueDialog'
+    );
+    if (mode === 'create') {
+      const result = await LinkGitHubIssueDialog.show({
+        projectId,
+        hostId: effectiveHostId,
+        initialRepo:
+          kanbanCreateGitHubIssueLink?.repo_full_name ?? defaultGitHubRepo,
+        initialLink: kanbanCreateGitHubIssueLink,
+      });
+
+      if (result?.action === 'linked') {
+        updateIssueComposerDraft({ githubIssueLink: result.link });
+      } else if (result?.action === 'unlinked') {
+        updateIssueComposerDraft({ githubIssueLink: null });
+      }
+      return;
+    }
+
+    if (!selectedKanbanIssueId) return;
+    await LinkGitHubIssueDialog.show({
+      projectId,
+      issueId: selectedKanbanIssueId,
+      hostId: effectiveHostId,
+      initialRepo: linkedGitHubIssue?.repoFullName ?? defaultGitHubRepo,
+      initialLink: getGitHubIssueLink(
+        selectedIssue?.extension_metadata ?? null
+      ),
+    });
+  }, [
+    projectId,
+    effectiveHostId,
+    linkedGitHubIssue?.repoFullName,
+    defaultGitHubRepo,
+    mode,
+    kanbanCreateGitHubIssueLink,
+    updateIssueComposerDraft,
+    selectedKanbanIssueId,
+    selectedIssue,
+  ]);
+
+  const handleRefreshGitHubIssue = useCallback(async () => {
+    if (!selectedKanbanIssueId || !selectedIssue) return;
+
+    const currentLink = getGitHubIssueLink(selectedIssue.extension_metadata);
+    if (!currentLink) return;
+
+    setIsRefreshingGitHubIssue(true);
+    try {
+      const summary = await githubIssuesApi.get(
+        currentLink.repo_full_name,
+        currentLink.issue_number,
+        effectiveHostId
+      );
+      const refreshedLink = {
+        ...currentLink,
+        ...createGitHubIssueLinkFromSummary(summary),
+      };
+      const { persisted } = updateIssue(selectedKanbanIssueId, {
+        extension_metadata: setGitHubIssueLink(
+          selectedIssue.extension_metadata,
+          refreshedLink
+        ),
+      });
+      await persisted;
+    } finally {
+      setIsRefreshingGitHubIssue(false);
+    }
+  }, [selectedKanbanIssueId, selectedIssue, effectiveHostId, updateIssue]);
+
+  const handleOpenImplicationMergeHandoff = useCallback(() => {
+    const handoffUrl =
+      linkedGitHubIssue?.latestPrUrl ?? linkedGitHubIssue?.issueUrl;
+    if (!handoffUrl) return;
+    window.open(handoffUrl, '_blank', 'noopener,noreferrer');
+  }, [linkedGitHubIssue]);
+
   // Loading state
   const isLoading = projectLoading || orgLoading;
   const isResolvingExpectedIssue =
@@ -1054,6 +1347,64 @@ export function KanbanIssuePanelContainer({
       onRemoveParentIssue={handleRemoveParentIssue}
       linkedPrs={linkedPrs}
       onLinkPr={mode === 'edit' ? handleLinkPr : undefined}
+      linkedGitHubIssue={
+        mode === 'create'
+          ? kanbanCreateGitHubIssueLink
+            ? {
+                repoFullName: kanbanCreateGitHubIssueLink.repo_full_name,
+                issueNumber: kanbanCreateGitHubIssueLink.issue_number,
+                issueUrl: kanbanCreateGitHubIssueLink.issue_url,
+                state: kanbanCreateGitHubIssueLink.last_seen_state,
+                latestPrNumber:
+                  kanbanCreateGitHubIssueLink.latest_pr_number ?? null,
+                latestPrUrl: kanbanCreateGitHubIssueLink.latest_pr_url ?? null,
+                latestAgentCheckpoint:
+                  kanbanCreateGitHubIssueLink.latest_agent_checkpoint ?? null,
+              }
+            : null
+          : linkedGitHubIssue
+      }
+      onManageGitHubIssueLink={handleManageGitHubIssueLink}
+      onRefreshGitHubIssue={
+        mode === 'edit' && linkedGitHubIssue
+          ? handleRefreshGitHubIssue
+          : undefined
+      }
+      isRefreshingGitHubIssue={isRefreshingGitHubIssue}
+      implicationAutopilotStatus={implicationAutopilotPanelStatus}
+      isImplicationAutopilotLoading={
+        shouldShowImplicationAutopilot &&
+        !!selectedIssueLocalWorkspaceId &&
+        autopilotStatusQuery.isLoading
+      }
+      onRefreshImplicationAutopilot={
+        shouldShowImplicationAutopilot && selectedIssueLocalWorkspaceId
+          ? () => void autopilotStatusQuery.refetch()
+          : undefined
+      }
+      onStartImplicationAutoReview={
+        shouldShowImplicationAutopilot &&
+        selectedIssueLocalWorkspaceId &&
+        implicationAutopilotPanelStatus?.nextAction === 'start_auto_review'
+          ? () => startAutoReviewMutation.mutate()
+          : undefined
+      }
+      isStartingImplicationAutoReview={startAutoReviewMutation.isPending}
+      onStartImplicationReviewFix={
+        shouldShowImplicationAutopilot &&
+        selectedIssueLocalWorkspaceId &&
+        implicationAutopilotPanelStatus?.nextAction === 'start_review_fix'
+          ? () => startReviewFixMutation.mutate()
+          : undefined
+      }
+      isStartingImplicationReviewFix={startReviewFixMutation.isPending}
+      onOpenImplicationMergeHandoff={
+        shouldShowImplicationAutopilot &&
+        implicationAutopilotPanelStatus?.nextAction === 'ready_for_merge' &&
+        (linkedGitHubIssue?.latestPrUrl || linkedGitHubIssue?.issueUrl)
+          ? handleOpenImplicationMergeHandoff
+          : undefined
+      }
       onClose={closeKanbanIssuePanel}
       onSubmit={handleSubmit}
       onCmdEnterSubmit={handleCmdEnterSubmit}

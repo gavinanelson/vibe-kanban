@@ -81,6 +81,13 @@ cargo install cargo-watch
 cargo install sqlx-cli
 ```
 
+If your machine does not already provide `libclang`, the local backend scripts
+will bootstrap a user-space copy into `.cache/libclang-venv` automatically the
+first time you run them. If `cargo-watch` is missing, `pnpm run dev` falls back
+to running the backend without file watching instead of failing outright. The
+backend startup wrapper also defaults to `CARGO_PROFILE_DEV_DEBUG=0` and
+`CARGO_BUILD_JOBS=1` so lower-memory Linux boxes can link the server reliably.
+
 Install dependencies:
 ```bash
 pnpm i
@@ -93,6 +100,43 @@ pnpm run dev
 ```
 
 This will start the backend and web app. A blank DB will be copied from the `dev_assets_seed` folder.
+
+### Implication Codex auto-review pilot
+
+The Implication Kanban auto-review flow is an app feature, not only an operator
+script. For workspaces linked to `gavinanelson/implication` issues, the issue
+panel shows implementation, Codex auto-review, review-fix, PR/merge, and next
+action state. The start review and review-fix buttons call the backend
+`/api/workspaces/{id}/implication-autopilot/*` routes.
+
+Review runs must use Vibe Kanban's `ReviewRequest` executor action. For Codex,
+that action starts `@openai/codex` app-server review mode through
+`ReviewStart`/`ReviewTarget::Custom`; do not replace it with a normal chat
+prompt when extending this flow.
+
+For a remote-authoritative setup, run this on the machine that owns the repos
+and workspaces. Then connect from your laptop using Vibe Kanban's built-in
+remote connection and configure your editor's Remote SSH Host in Settings.
+
+On macOS machines with Homebrew and rustup installed in the usual locations,
+you can launch the local dev app from a clone with:
+
+```bash
+./scripts/start-local-dev.sh
+```
+
+If you want the frontend and backend to keep running independently in the
+background, use:
+
+```bash
+./scripts/start-local-stack.sh
+```
+
+Then stop them with:
+
+```bash
+./scripts/stop-local-stack.sh
+```
 
 ### Building the web app
 

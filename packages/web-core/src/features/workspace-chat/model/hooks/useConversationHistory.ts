@@ -6,6 +6,7 @@ import {
 import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { streamJsonPatchEntries } from '@/shared/lib/streamJsonPatchEntries';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import type {
   AddEntryType,
   ConversationTimelineSource,
@@ -30,6 +31,7 @@ export const useConversationHistory = ({
   onTimelineUpdated,
   scopeKey,
 }: UseConversationHistoryParams): UseConversationHistoryResult => {
+  const hostId = useHostId();
   const {
     executionProcessesVisible: executionProcessesRaw,
     isLoading,
@@ -105,6 +107,7 @@ export const useConversationHistory = ({
 
     return new Promise<PatchType[]>((resolve) => {
       const controller = streamJsonPatchEntries<PatchType>(url, {
+        hostId,
         onFinished: (allEntries) => {
           controller.close();
           resolve(allEntries);
@@ -215,6 +218,7 @@ export const useConversationHistory = ({
           url = `/api/execution-processes/${executionProcess.id}/normalized-logs/ws`;
         }
         const controller = streamJsonPatchEntries<PatchType>(url, {
+          hostId,
           onEntries(entries) {
             const patchesWithKey = entries.map((entry, index) =>
               patchWithKey(entry, executionProcess.id, index)
@@ -239,7 +243,7 @@ export const useConversationHistory = ({
         });
       });
     },
-    [emitEntries]
+    [emitEntries, hostId]
   );
 
   // Sometimes it can take a few seconds for the stream to start, wrap the loadRunningAndEmit method
@@ -290,7 +294,7 @@ export const useConversationHistory = ({
 
       return localDisplayedExecutionProcesses;
     },
-    [executionProcesses]
+    [executionProcesses, hostId]
   );
 
   const loadRemainingEntriesInBatches = useCallback(
@@ -331,7 +335,7 @@ export const useConversationHistory = ({
       }
       return anyUpdated;
     },
-    [executionProcesses]
+    [executionProcesses, hostId]
   );
 
   const ensureProcessVisible = useCallback((p: ExecutionProcess) => {

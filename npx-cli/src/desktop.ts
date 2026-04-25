@@ -1,4 +1,4 @@
-import { execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -9,6 +9,15 @@ type TauriPlatform = string | null;
 interface SentinelMeta {
   type: string;
   appPath: string;
+}
+
+interface HyprlandClient {
+  address?: string;
+  class?: string;
+  initialClass?: string;
+  title?: string;
+  mapped?: boolean;
+  hidden?: boolean;
 }
 
 const PLATFORM_MAP: Record<string, string> = {
@@ -180,15 +189,245 @@ async function installAndLaunchLinux(
 }
 
 function launchLinuxAppImage(appImagePath: string): Promise<number> {
+  return withLinuxLaunchLock(async () => {
+    if (focusExistingLinuxWindow()) {
+      return 0;
+    }
+
+    if (canInspectHyprlandWindows()) {
+      await killHeadlessLinuxInstances(appImagePath);
+
+      if (focusExistingLinuxWindow()) {
+        return 0;
+      }
+    }
+
+    return spawnLinuxAppImage(appImagePath);
+  });
+}
+
+async function withLinuxLaunchLock(
+  launch: () => Promise<number>
+): Promise<number> {
+  const runtimeDir =
+    process.env.XDG_RUNTIME_DIR ||
+    path.join(os.tmpdir(), `user-${process.getuid?.() ?? 'unknown'}`);
+  const lockDir = path.join(runtimeDir, 'vibe-kanban-desktop-launch.lock');
+  const pidPath = path.join(lockDir, 'pid');
+  let acquired = false;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.mkdirSync(lockDir, { mode: 0o700 });
+      fs.writeFileSync(pidPath, `${process.pid}\n`);
+      acquired = true;
+      break;
+    } catch (err: unknown) {
+      if (!isFileExistsError(err)) {
+        break;
+      }
+
+      const lockPid = readPid(pidPath);
+      if (lockPid && isProcessAlive(lockPid)) {
+        focusExistingLinuxWindow();
+        return 0;
+      }
+
+      try {
+        fs.rmSync(lockDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  try {
+    return await launch();
+  } finally {
+    if (acquired) {
+      try {
+        fs.rmSync(lockDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+}
+
+function isFileExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as NodeJS.ErrnoException).code === 'EEXIST'
+  );
+}
+
+function readPid(pidPath: string): number | null {
+  try {
+    const pid = Number.parseInt(
+      fs.readFileSync(pidPath, 'utf-8').trim(),
+      10
+    );
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function focusExistingLinuxWindow(): boolean {
+  const clients = getHyprlandClients();
+  if (!clients) return false;
+
+  const client = clients.find(isVisibleVibeKanbanClient);
+  if (!client?.address) return false;
+
+  try {
+    execFileSync('hyprctl', [
+      'dispatch',
+      'focuswindow',
+      `address:${client.address}`,
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getHyprlandClients(): HyprlandClient[] | null {
+  if (!process.env.HYPRLAND_INSTANCE_SIGNATURE) {
+    return null;
+  }
+
+  try {
+    const output = execFileSync('hyprctl', ['clients', '-j'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const clients = JSON.parse(output) as unknown;
+    return Array.isArray(clients) ? (clients as HyprlandClient[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function canInspectHyprlandWindows(): boolean {
+  return getHyprlandClients() !== null;
+}
+
+function isVisibleVibeKanbanClient(client: HyprlandClient): boolean {
+  if (client.mapped === false || client.hidden === true) {
+    return false;
+  }
+
+  return [client.title, client.class, client.initialClass].some((value) =>
+    /vibe[- ]kanban/i.test(value || '')
+  );
+}
+
+async function killHeadlessLinuxInstances(
+  appImagePath: string
+): Promise<void> {
+  const pids = getVibeKanbanLinuxPids(appImagePath);
+  if (pids.length === 0) return;
+
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {}
+  }
+
+  for (let attempt = 0; attempt < 15; attempt++) {
+    if (pids.every((pid) => !isProcessAlive(pid))) {
+      return;
+    }
+    await sleep(100);
+  }
+
+  for (const pid of pids) {
+    if (!isProcessAlive(pid)) continue;
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getVibeKanbanLinuxPids(appImagePath: string): number[] {
+  let output: string;
+  try {
+    output = execFileSync('ps', ['-eo', 'pid=,args='], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return [];
+  }
+
+  const appImageName = path.basename(appImagePath);
+  return output
+    .split('\n')
+    .map((line) => {
+      const match = line.match(/^\s*(\d+)\s+(.*)$/);
+      if (!match) return null;
+      return { pid: Number.parseInt(match[1], 10), args: match[2] };
+    })
+    .filter(
+      (processInfo): processInfo is { pid: number; args: string } =>
+        !!processInfo &&
+        processInfo.pid !== process.pid &&
+        Number.isFinite(processInfo.pid) &&
+        isVibeKanbanLinuxProcess(
+          processInfo.args,
+          appImagePath,
+          appImageName
+        )
+    )
+    .map((processInfo) => processInfo.pid);
+}
+
+function isVibeKanbanLinuxProcess(
+  args: string,
+  appImagePath: string,
+  appImageName: string
+): boolean {
+  return (
+    args.includes('vibe-kanban-tauri') ||
+    args.includes(appImagePath) ||
+    args.includes(appImageName)
+  );
+}
+
+function spawnLinuxAppImage(appImagePath: string): Promise<number> {
   const appImage = path.basename(appImagePath);
   console.error(`Launching ${appImage}...`);
   const proc = spawn(appImagePath, [], {
-    stdio: 'inherit',
-    detached: false,
+    stdio: 'ignore',
+    detached: true,
+    env: getLinuxDesktopEnv(),
   });
-  return new Promise((resolve) => {
-    proc.on('exit', (code) => resolve(code || 0));
-  });
+  proc.unref();
+  return Promise.resolve(0);
+}
+
+function getLinuxDesktopEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    XDG_SESSION_TYPE: process.env.XDG_SESSION_TYPE || 'wayland',
+    XDG_CURRENT_DESKTOP:
+      process.env.XDG_CURRENT_DESKTOP ||
+      (process.env.HYPRLAND_INSTANCE_SIGNATURE ? 'Hyprland' : undefined),
+    GDK_BACKEND: process.env.GDK_BACKEND || 'wayland,x11',
+    QT_QPA_PLATFORM: process.env.QT_QPA_PLATFORM || 'wayland;xcb',
+  };
 }
 
 // Windows: run NSIS setup.exe silently, then launch installed app

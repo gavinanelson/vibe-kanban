@@ -1,5 +1,6 @@
 import { useMutation } from '@tanstack/react-query';
 import { sessionsApi } from '@/shared/lib/api';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import {
   RestoreLogsDialog,
   type RestoreLogsDialogResult,
@@ -30,6 +31,8 @@ export function useMessageEditRetry(
   onSuccess?: () => void,
   onError?: (err: unknown) => void
 ) {
+  const hostId = useHostId();
+
   return useMutation({
     mutationFn: async ({
       message,
@@ -54,13 +57,17 @@ export function useMessageEditRetry(
       }
 
       // Send the retry request with the edited message
-      await sessionsApi.followUp(sessionId, {
-        prompt: message,
-        executor_config: executorConfig,
-        retry_process_id: executionProcessId,
-        force_when_dirty: modalResult.forceWhenDirty ?? false,
-        perform_git_reset: modalResult.performGitReset ?? true,
-      });
+      await sessionsApi.followUp(
+        sessionId,
+        {
+          prompt: message,
+          executor_config: executorConfig,
+          retry_process_id: executionProcessId,
+          force_when_dirty: modalResult.forceWhenDirty ?? false,
+          perform_git_reset: modalResult.performGitReset ?? true,
+        },
+        hostId
+      );
     },
     onSuccess: () => {
       onSuccess?.();

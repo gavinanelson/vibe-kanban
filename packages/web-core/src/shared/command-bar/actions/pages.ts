@@ -170,6 +170,7 @@ export const Pages: Record<StaticPageId, CommandBarPage> = {
           { type: 'action', action: Actions.AddSubIssue },
           { type: 'action', action: Actions.RemoveParentIssue },
           { type: 'action', action: Actions.LinkWorkspace },
+          { type: 'action', action: Actions.LinkGitHubIssue },
           { type: 'action', action: Actions.MarkBlocking },
           { type: 'action', action: Actions.MarkBlockedBy },
           { type: 'action', action: Actions.MarkRelated },

@@ -61,7 +61,8 @@ export interface AppNavigation {
     projectId: string,
     issueId: string,
     workspaceId: string,
-    transition?: NavigationTransition
+    transition?: NavigationTransition,
+    hostId?: string | null
   ): void;
   goToProjectIssueWorkspaceCreate(
     projectId: string,

@@ -105,6 +105,7 @@ import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
 import { resolveHostRequestScope } from '@/shared/lib/hostRequestScope';
+import type { GitHubIssueSummary } from '@/shared/lib/githubIssueLink';
 import { makeRequest as makeRemoteRequest } from '@/shared/lib/remoteApi';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
 
@@ -182,6 +183,64 @@ export type Result<T, E> = Ok<T> | Err<E>;
 type ListRemoteProjectsResponse = {
   projects: RemoteProject[];
 };
+
+export type ImplicationAutopilotDecision =
+  | 'missing'
+  | 'running'
+  | 'pass'
+  | 'request_changes'
+  | 'failed';
+
+export type ImplicationAutopilotNextAction =
+  | 'no_workspace'
+  | 'wait_for_implementation'
+  | 'start_auto_review'
+  | 'wait_for_auto_review'
+  | 'start_review_fix'
+  | 'wait_for_review_fix'
+  | 'ready_for_merge'
+  | 'merge_wait'
+  | 'done'
+  | 'investigate_failure';
+
+export interface ImplicationAutopilotProcessSummary {
+  id: string;
+  session_id: string;
+  session_name?: string | null;
+  status: 'running' | 'completed' | 'failed' | 'killed';
+  run_reason: string;
+  exit_code?: number | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export type ImplicationAutopilotStartReviewRequest = {
+  rerun?: boolean;
+  github_repo_full_name?: string | null;
+};
+
+export type ImplicationAutopilotStartReviewFixRequest = {
+  github_repo_full_name?: string | null;
+};
+
+export interface ImplicationAutopilotStatus {
+  workspace_id: string;
+  workspace_name?: string | null;
+  implementation_state: string;
+  auto_review_state: ImplicationAutopilotDecision;
+  latest_review_decision: ImplicationAutopilotDecision;
+  latest_review_excerpt?: string | null;
+  review_fix_state: string;
+  pr_merge_state: string;
+  next_action: ImplicationAutopilotNextAction;
+  blocker?: string | null;
+  implementation_process?: ImplicationAutopilotProcessSummary | null;
+  auto_review_process?: ImplicationAutopilotProcessSummary | null;
+  review_fix_process?: ImplicationAutopilotProcessSummary | null;
+  default_model: string;
+  default_reasoning: string;
+  daemonized: boolean;
+}
 
 export type OrganizationBillingStatus =
   | 'free'
@@ -316,24 +375,37 @@ export const handleApiResponse = async <T, E = T>(
 
 // Sessions API
 export const sessionsApi = {
-  getByWorkspace: async (workspaceId: string): Promise<Session[]> => {
-    const response = await makeRequest(
-      `/api/sessions?workspace_id=${workspaceId}`
+  getByWorkspace: async (
+    workspaceId: string,
+    hostId?: string | null
+  ): Promise<Session[]> => {
+    const response = await makeHostAwareRequest(
+      `/api/sessions?workspace_id=${workspaceId}`,
+      hostId
     );
     return handleApiResponse<Session[]>(response);
   },
 
-  getById: async (sessionId: string): Promise<Session> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}`);
+  getById: async (
+    sessionId: string,
+    hostId?: string | null
+  ): Promise<Session> => {
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}`,
+      hostId
+    );
     return handleApiResponse<Session>(response);
   },
 
-  create: async (data: {
-    workspace_id: string;
-    executor?: string;
-    name?: string;
-  }): Promise<Session> => {
-    const response = await makeRequest('/api/sessions', {
+  create: async (
+    data: {
+      workspace_id: string;
+      executor?: string;
+      name?: string;
+    },
+    hostId?: string | null
+  ): Promise<Session> => {
+    const response = await makeHostAwareRequest('/api/sessions', hostId, {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -342,43 +414,63 @@ export const sessionsApi = {
 
   followUp: async (
     sessionId: string,
-    data: CreateFollowUpAttempt
+    data: CreateFollowUpAttempt,
+    hostId?: string | null
   ): Promise<ExecutionProcess> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}/follow-up`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}/follow-up`,
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
     return handleApiResponse<ExecutionProcess>(response);
   },
 
   startReview: async (
     sessionId: string,
-    data: StartReviewRequest
+    data: StartReviewRequest,
+    hostId?: string | null
   ): Promise<ExecutionProcess> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}/review`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}/review`,
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
     return handleApiResponse<ExecutionProcess, ReviewError>(response);
   },
 
   reset: async (
     sessionId: string,
-    data: ResetProcessRequest
+    data: ResetProcessRequest,
+    hostId?: string | null
   ): Promise<void> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}/reset`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}/reset`,
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    );
     return handleApiResponse<void>(response);
   },
 
   runSetupScript: async (
-    sessionId: string
+    sessionId: string,
+    hostId?: string | null
   ): Promise<Result<ExecutionProcess, RunScriptError>> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}/setup`, {
-      method: 'POST',
-    });
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}/setup`,
+      hostId,
+      {
+        method: 'POST',
+      }
+    );
     return handleApiResponseAsResult<ExecutionProcess, RunScriptError>(
       response
     );
@@ -386,12 +478,17 @@ export const sessionsApi = {
 
   update: async (
     sessionId: string,
-    data: { name?: string }
+    data: { name?: string },
+    hostId?: string | null
   ): Promise<Session> => {
-    const response = await makeRequest(`/api/sessions/${sessionId}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    });
+    const response = await makeHostAwareRequest(
+      `/api/sessions/${sessionId}`,
+      hostId,
+      {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }
+    );
     return handleApiResponse<Session>(response);
   },
 };
@@ -419,8 +516,14 @@ export const workspacesApi = {
     return handleApiResponse<Workspace[]>(response);
   },
 
-  get: async (workspaceId: string): Promise<Workspace> => {
-    const response = await makeRequest(`/api/workspaces/${workspaceId}`);
+  get: async (
+    workspaceId: string,
+    hostId?: string | null
+  ): Promise<Workspace> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}`,
+      hostId
+    );
     return handleApiResponse<Workspace>(response);
   },
 
@@ -437,11 +540,12 @@ export const workspacesApi = {
 
   /** Get workspace with latest session */
   getWithSession: async (
-    workspaceId: string
+    workspaceId: string,
+    hostId?: string | null
   ): Promise<WorkspaceWithSession> => {
     const [workspace, sessions] = await Promise.all([
-      workspacesApi.get(workspaceId),
-      sessionsApi.getByWorkspace(workspaceId),
+      workspacesApi.get(workspaceId, hostId),
+      sessionsApi.getByWorkspace(workspaceId, hostId),
     ]);
     return createWorkspaceWithSession(workspace, sessions[0]);
   },
@@ -1591,6 +1695,56 @@ export const queueApi = {
   },
 };
 
+export const implicationAutopilotApi = {
+  getStatus: async (
+    workspaceId: string,
+    hostId?: string | null
+  ): Promise<ImplicationAutopilotStatus> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}/implication-autopilot/status`,
+      hostId
+    );
+    return handleApiResponse<ImplicationAutopilotStatus>(response);
+  },
+
+  startReview: async (
+    workspaceId: string,
+    hostId?: string | null,
+    opts: ImplicationAutopilotStartReviewRequest = {}
+  ): Promise<ImplicationAutopilotProcessSummary> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}/implication-autopilot/review`,
+      hostId,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rerun: opts.rerun ?? false,
+          github_repo_full_name: opts.github_repo_full_name ?? null,
+        }),
+      }
+    );
+    return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
+  },
+
+  startReviewFix: async (
+    workspaceId: string,
+    hostId?: string | null,
+    payload: ImplicationAutopilotStartReviewFixRequest = {}
+  ): Promise<ImplicationAutopilotProcessSummary> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}/implication-autopilot/review-fix`,
+      hostId,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    );
+    return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
+  },
+};
+
 // Relay API
 export const relayApi = {
   getEnrollmentCode: async (): Promise<{ enrollment_code: string }> => {
@@ -1659,6 +1813,67 @@ export const relayApi = {
       body: JSON.stringify(payload),
     });
     return handleApiResponse<OpenRemoteEditorResponse>(response);
+  },
+};
+
+interface SearchGitHubIssuesResponse {
+  issues: GitHubIssueSummary[];
+}
+
+interface ResolveGitHubIssueUrlRequest {
+  url: string;
+}
+
+export const githubIssuesApi = {
+  search: async (
+    repo: string,
+    query = '',
+    opts?: { limit?: number; hostId?: string | null }
+  ): Promise<GitHubIssueSummary[]> => {
+    const params = new URLSearchParams();
+    params.set('repo', repo);
+    if (query.trim()) {
+      params.set('q', query.trim());
+    }
+    if (opts?.limit) {
+      params.set('limit', String(opts.limit));
+    }
+
+    const response = await makeHostAwareRequest(
+      `/api/github/issues/search?${params.toString()}`,
+      opts?.hostId
+    );
+    const result =
+      await handleApiResponse<SearchGitHubIssuesResponse>(response);
+    return result.issues;
+  },
+
+  resolveUrl: async (
+    url: string,
+    hostId?: string | null
+  ): Promise<GitHubIssueSummary> => {
+    const response = await makeHostAwareRequest(
+      '/api/github/issues/resolve-url',
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify({ url } satisfies ResolveGitHubIssueUrlRequest),
+      }
+    );
+    return handleApiResponse<GitHubIssueSummary>(response);
+  },
+
+  get: async (
+    repoFullName: string,
+    issueNumber: number,
+    hostId?: string | null
+  ): Promise<GitHubIssueSummary> => {
+    const [owner, repo] = repoFullName.split('/');
+    const response = await makeHostAwareRequest(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${issueNumber}`,
+      hostId
+    );
+    return handleApiResponse<GitHubIssueSummary>(response);
   },
 };
 

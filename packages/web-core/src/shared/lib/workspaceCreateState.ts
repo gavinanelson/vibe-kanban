@@ -4,6 +4,7 @@ import { ScratchType } from 'shared/types';
 import type { AppRuntime } from '@/shared/hooks/useAppRuntime';
 import { scratchApi } from '@/shared/lib/api';
 import { localStorageScratchUpdate } from '@/shared/hooks/useLocalStorageScratch';
+import type { GitHubIssueLink } from '@/shared/lib/githubIssueLink';
 
 interface WorkspaceDefaultsLike {
   preferredRepos?: CreateModeInitialState['preferredRepos'];
@@ -25,15 +26,22 @@ export const DEFAULT_WORKSPACE_CREATE_DRAFT_ID =
 
 export function buildWorkspaceCreatePrompt(
   title: string | null | undefined,
-  description: string | null | undefined
+  description: string | null | undefined,
+  githubIssueLink?: GitHubIssueLink | null
 ): string | null {
   const trimmedTitle = title?.trim();
   if (!trimmedTitle) return null;
 
   const trimmedDescription = description?.trim();
-  return trimmedDescription
+  const basePrompt = trimmedDescription
     ? `${trimmedTitle}\n\n${trimmedDescription}`
     : trimmedTitle;
+
+  if (!githubIssueLink) {
+    return basePrompt;
+  }
+
+  return `${basePrompt}\n\n---\nLinked GitHub issue: ${githubIssueLink.repo_full_name}#${githubIssueLink.issue_number}\nIssue URL: ${githubIssueLink.issue_url}\nMaintain task progress visibility on that issue while you work.`;
 }
 
 export function buildLinkedIssueCreateState(

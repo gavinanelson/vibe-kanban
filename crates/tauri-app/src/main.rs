@@ -382,7 +382,7 @@ fn create_window<R: tauri::Runtime, M: tauri::Manager<R>>(
     let builder = tauri::WebviewWindowBuilder::new(manager, "main", url)
         .title("Vibe Kanban")
         .inner_size(1280.0, 800.0)
-        .min_inner_size(800.0, 600.0)
+        .min_inner_size(640.0, 480.0)
         .resizable(true)
         .zoom_hotkeys_enabled(false)
         .disable_drag_drop_handler();
@@ -395,6 +395,13 @@ fn create_window<R: tauri::Runtime, M: tauri::Manager<R>>(
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(8.0, 14.0));
+
+    // Linux laptop/native workflow: use the app chrome, not the desktop window
+    // manager chrome. Gavin opens this through the native launcher on omarchy;
+    // showing the OS title bar duplicates app navigation and wastes vertical
+    // space.
+    #[cfg(target_os = "linux")]
+    let builder = builder.decorations(false).maximized(true);
 
     builder
         .on_new_window(move |url, _features| {

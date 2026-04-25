@@ -31,7 +31,6 @@ import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestinatio
 import {
   getDestinationHostId,
   getProjectDestination,
-  isProjectDestination,
   isLocalWorkspacesDestination,
 } from '@/shared/lib/routes/appNavigation';
 import {
@@ -173,8 +172,7 @@ export function SharedAppLayout() {
   );
   const isWorkspacesActive = isLocalWorkspacesDestination(currentDestination);
   const isExportActive = currentDestination?.kind === 'export';
-  const showCloudShutdownBanner =
-    isExportActive || (isSignedIn && isProjectDestination(currentDestination));
+  const showCloudShutdownBanner = false;
   const isWorkspaceSidebarPreviewEnabled =
     !isMobile && isWorkspacesActive && !isLeftSidebarVisible;
   const activeProjectId = projectDestination?.projectId ?? null;
@@ -369,7 +367,7 @@ export function SharedAppLayout() {
               discordIconPath={siDiscord.path}
             />
             {/* Desktop content. */}
-            <div className="relative min-h-0 overflow-hidden">
+            <div className="relative min-h-0 min-w-0 overflow-hidden">
               {isWorkspaceSidebarPreviewEnabled && (
                 <div className="absolute inset-y-0 left-0 z-20 flex items-center">
                   <WorkspacesSidebarReopenTag

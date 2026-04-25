@@ -9,7 +9,8 @@ import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useProjectWorkspaceCreateDraft } from '@/shared/hooks/useProjectWorkspaceCreateDraft';
-import { workspacesApi } from '@/shared/lib/api';
+import { workspacesApi, relayApi } from '@/shared/lib/api';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import { getWorkspaceDefaults } from '@/shared/lib/workspaceDefaults';
 import {
   buildLinkedIssueCreateState,
@@ -17,6 +18,8 @@ import {
   buildWorkspaceCreateInitialState,
   buildWorkspaceCreatePrompt,
 } from '@/shared/lib/workspaceCreateState';
+import { getGitHubIssueLink } from '@/shared/lib/githubIssueLink';
+import { deriveAutoReviewStatus } from '@/shared/lib/autoReviewStatus';
 import { ConfirmDialog } from '@vibe/ui/components/ConfirmDialog';
 import { DeleteWorkspaceDialog } from '@vibe/ui/components/DeleteWorkspaceDialog';
 import type { WorkspaceWithStats } from '@vibe/ui/components/IssueWorkspaceCard';
@@ -37,6 +40,7 @@ export function IssueWorkspacesSectionContainer({
   const { t } = useTranslation('common');
   const { projectId } = useParams({ strict: false });
   const appNavigation = useAppNavigation();
+  const currentHostId = useHostId();
   const { openWorkspaceCreateFromState } = useProjectWorkspaceCreateDraft();
   const { userId } = useAuth();
   const { workspaces } = useUserContext();
@@ -46,6 +50,7 @@ export function IssueWorkspacesSectionContainer({
     getIssue,
     getWorkspacesForIssue,
     issues,
+    statuses,
     isLoading: projectLoading,
   } = useProjectContext();
   const { activeWorkspaces, archivedWorkspaces } = useWorkspaceContext();
@@ -68,6 +73,10 @@ export function IssueWorkspacesSectionContainer({
   // Get workspaces for the issue, with PR info
   const workspacesWithStats: WorkspaceWithStats[] = useMemo(() => {
     const rawWorkspaces = getWorkspacesForIssue(issueId);
+    const issue = getIssue(issueId);
+    const issueStatusName = issue
+      ? statuses.find((status) => status.id === issue.status_id)?.name
+      : null;
 
     return rawWorkspaces.map((workspace) => {
       const localWorkspace = workspace.local_workspace_id
@@ -92,9 +101,11 @@ export function IssueWorkspacesSectionContainer({
         localWorkspaceId: workspace.local_workspace_id,
         name: workspace.name,
         archived: workspace.archived,
-        filesChanged: workspace.files_changed ?? 0,
-        linesAdded: workspace.lines_added ?? 0,
-        linesRemoved: workspace.lines_removed ?? 0,
+        filesChanged:
+          localWorkspace?.filesChanged ?? workspace.files_changed ?? 0,
+        linesAdded: localWorkspace?.linesAdded ?? workspace.lines_added ?? 0,
+        linesRemoved:
+          localWorkspace?.linesRemoved ?? workspace.lines_removed ?? 0,
         prs: linkedPrs,
         owner,
         updatedAt: workspace.updated_at,
@@ -105,11 +116,17 @@ export function IssueWorkspacesSectionContainer({
         hasUnseenActivity: localWorkspace?.hasUnseenActivity,
         latestProcessCompletedAt: localWorkspace?.latestProcessCompletedAt,
         latestProcessStatus: localWorkspace?.latestProcessStatus,
+        autoReviewStatus: deriveAutoReviewStatus({
+          issueStatusName,
+          workspace: localWorkspace,
+        }),
       };
     });
   }, [
     issueId,
     getWorkspacesForIssue,
+    getIssue,
+    statuses,
     pullRequests,
     membersWithProfilesById,
     userId,
@@ -136,7 +153,8 @@ export function IssueWorkspacesSectionContainer({
     const issue = getIssue(issueId);
     const initialPrompt = buildWorkspaceCreatePrompt(
       issue?.title ?? null,
-      issue?.description ?? null
+      issue?.description ?? null,
+      getGitHubIssueLink(issue?.extension_metadata)
     );
     const localWorkspaceIds = buildLocalWorkspaceIdSet(
       activeWorkspaces,
@@ -191,18 +209,38 @@ export function IssueWorkspacesSectionContainer({
     await WorkspaceSelectionDialog.show({ projectId, issueId });
   }, [projectId, issueId]);
 
-  // Handle clicking a workspace card to open it
+  // Handle clicking a workspace card to open the in-kanban workspace/session
+  // panel. This must preserve the kanban context rather than jumping to the
+  // full workspace route so the issue sidebar remains useful.
   const handleWorkspaceClick = useCallback(
-    (localWorkspaceId: string | null) => {
-      if (projectId && localWorkspaceId) {
-        appNavigation.goToProjectIssueWorkspace(
-          projectId,
-          issueId,
-          localWorkspaceId
-        );
+    async (localWorkspaceId: string | null) => {
+      if (!projectId || !localWorkspaceId) {
+        return;
       }
+
+      let targetHostId = currentHostId;
+      if (!targetHostId) {
+        try {
+          const pairedHosts = await relayApi.listPairedRelayHosts();
+          targetHostId =
+            pairedHosts.length === 1 ? pairedHosts[0].host_id : null;
+        } catch (error) {
+          console.warn(
+            'Failed to resolve paired host for issue workspace',
+            error
+          );
+        }
+      }
+
+      appNavigation.goToProjectIssueWorkspace(
+        projectId,
+        issueId,
+        localWorkspaceId,
+        undefined,
+        targetHostId
+      );
     },
-    [projectId, issueId, appNavigation]
+    [projectId, issueId, appNavigation, currentHostId]
   );
 
   // Handle unlinking a workspace from the issue

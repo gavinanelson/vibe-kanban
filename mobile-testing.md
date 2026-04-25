@@ -231,10 +231,9 @@ pnpm --filter @vibe/remote-web dev
 # Terminal 3 — Caddy (dev config)
 caddy run --config Caddyfile.dev
 
-# Terminal 4 (optional) — Local desktop client
-VK_SHARED_API_BASE=https://$TS_HOSTNAME:3001 \
-VK_SHARED_RELAY_API_BASE=https://$TS_HOSTNAME:8443 \
-pnpm run dev
+# Terminal 4 (optional) — Local desktop client on xanadu-host
+# Uses loopback so bridge registration passes the loopback host check.
+scripts/start-tailnet-host-stack.sh
 ```
 
 > Vite binds to `localhost:3002`. The `Caddyfile.dev` uses `localhost` (not `127.0.0.1`) to match — this avoids IPv6/IPv4 mismatch issues on macOS.
@@ -281,10 +280,9 @@ pnpm --filter @vibe/remote-web dev
 # Terminal 3 — Caddy
 caddy run --config Caddyfile.dev
 
-# Terminal 4 (optional) — Desktop client
-VK_SHARED_API_BASE=https://$TS_HOSTNAME:3001 \
-VK_SHARED_RELAY_API_BASE=https://$TS_HOSTNAME:8443 \
-pnpm run dev
+# Terminal 4 (optional) — Desktop client on xanadu-host
+# Uses loopback so bridge registration passes the loopback host check.
+scripts/start-tailnet-host-stack.sh
 
 # On phone
 echo "https://$TS_HOSTNAME:3001"

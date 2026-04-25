@@ -3,8 +3,7 @@ import { useLocation } from "@tanstack/react-router";
 import { useWorkspaceContext } from "@/shared/hooks/useWorkspaceContext";
 import { useActions } from "@/shared/hooks/useActions";
 import { useSyncErrorContext } from "@/shared/hooks/useSyncErrorContext";
-import { useUserOrganizations } from "@/shared/hooks/useUserOrganizations";
-import { useOrganizationStore } from "@/shared/stores/useOrganizationStore";
+
 import { Navbar, type NavbarSectionItem } from "@vibe/ui/components/Navbar";
 import { NavbarActionGroups } from "@/shared/actions";
 import {
@@ -110,11 +109,6 @@ export function RemoteDesktopNavbar() {
     /^\/projects\/[^/]+/.test(location.pathname) ||
     /^\/hosts\/[^/]+\/projects\/[^/]+/.test(location.pathname);
 
-  const { data: orgsData } = useUserOrganizations();
-  const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
-  const orgName =
-    orgsData?.organizations.find((o) => o.id === selectedOrgId)?.name ?? "";
-
   const actionCtx = useActionVisibilityContext();
 
   const handleExecuteAction = useCallback(
@@ -156,7 +150,12 @@ export function RemoteDesktopNavbar() {
     CommandBarDialog.show();
   }, []);
 
-  const navbarTitle = isOnProjectPage ? orgName : selectedWorkspace?.branch;
+  // Project pages already show the active project in the left app rail and
+  // inside the board header. Showing the organization name here was confusing
+  // for self-hosted use because the seed org can be named "Vibe Kanban Cloud".
+  // Keep the bar for actions/drag-region, but do not brand the local native
+  // workflow as cloud.
+  const navbarTitle = isOnProjectPage ? undefined : selectedWorkspace?.branch;
 
   return (
     <Navbar

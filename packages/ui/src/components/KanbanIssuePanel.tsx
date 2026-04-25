@@ -16,6 +16,11 @@ import {
   TrashIcon,
   PaperclipIcon,
   ImageIcon,
+  ArrowSquareOutIcon,
+  ArrowsClockwiseIcon,
+  GithubLogoIcon,
+  RobotIcon,
+  PlayIcon,
 } from '@phosphor-icons/react';
 import {
   IssueTagsRow,
@@ -62,6 +67,32 @@ export interface IssueFormData {
 
 export interface LinkedPullRequest extends IssueTagsLinkedPullRequest {}
 
+export interface ImplicationAutopilotPanelStatus {
+  implementationState: string;
+  autoReviewState: string;
+  latestReviewDecision: string;
+  latestReviewExcerpt?: string | null;
+  reviewFixState: string;
+  prMergeState: string;
+  nextAction: string;
+  nextActionLabel: string;
+  nextActionDescription: string;
+  blocker?: string | null;
+  defaultModel: string;
+  defaultReasoning: string;
+  daemonized: boolean;
+}
+
+export interface LinkedGitHubIssue {
+  repoFullName: string;
+  issueNumber: number;
+  issueUrl: string;
+  state?: string | null;
+  latestPrNumber?: number | null;
+  latestPrUrl?: string | null;
+  latestAgentCheckpoint?: string | null;
+}
+
 export interface KanbanIssueDescriptionEditorProps {
   placeholder: string;
   value: string;
@@ -105,6 +136,18 @@ export interface KanbanIssuePanelProps {
   onRemoveParentIssue?: () => void;
   linkedPrs?: LinkedPullRequest[];
   onLinkPr?: () => void;
+  linkedGitHubIssue?: LinkedGitHubIssue | null;
+  onManageGitHubIssueLink?: () => void;
+  onRefreshGitHubIssue?: () => void;
+  isRefreshingGitHubIssue?: boolean;
+  implicationAutopilotStatus?: ImplicationAutopilotPanelStatus | null;
+  isImplicationAutopilotLoading?: boolean;
+  onRefreshImplicationAutopilot?: () => void;
+  onStartImplicationAutoReview?: () => void;
+  isStartingImplicationAutoReview?: boolean;
+  onStartImplicationReviewFix?: () => void;
+  isStartingImplicationReviewFix?: boolean;
+  onOpenImplicationMergeHandoff?: () => void;
 
   // Actions
   onClose: () => void;
@@ -156,6 +199,19 @@ export interface KanbanIssuePanelProps {
   renderCommentsSection?: (issueId: string) => ReactNode;
 }
 
+function AutopilotFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-normal text-low">
+        {label}
+      </div>
+      <div className="truncate text-xs font-medium text-normal">
+        {value.replaceAll('_', ' ')}
+      </div>
+    </div>
+  );
+}
+
 export function KanbanIssuePanel({
   mode,
   displayId,
@@ -171,6 +227,18 @@ export function KanbanIssuePanel({
   onRemoveParentIssue,
   linkedPrs = [],
   onLinkPr,
+  linkedGitHubIssue,
+  onManageGitHubIssueLink,
+  onRefreshGitHubIssue,
+  isRefreshingGitHubIssue,
+  implicationAutopilotStatus,
+  isImplicationAutopilotLoading,
+  onRefreshImplicationAutopilot,
+  onStartImplicationAutoReview,
+  isStartingImplicationAutoReview,
+  onStartImplicationReviewFix,
+  isStartingImplicationReviewFix,
+  onOpenImplicationMergeHandoff,
   onClose,
   onSubmit,
   onCmdEnterSubmit,
@@ -331,6 +399,241 @@ export function KanbanIssuePanel({
             disabled={isSubmitting}
           />
         </div>
+
+        {(linkedGitHubIssue || onManageGitHubIssueLink) && (
+          <div className="px-base py-base border-b">
+            {linkedGitHubIssue ? (
+              <div className="rounded-md border border-border bg-muted/30 px-base py-half">
+                <div className="flex items-start justify-between gap-base">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-half text-sm font-medium text-high">
+                      <GithubLogoIcon className="size-icon-sm" weight="fill" />
+                      <span className="truncate">
+                        GH #{linkedGitHubIssue.issueNumber}
+                      </span>
+                      {linkedGitHubIssue.state && (
+                        <span className="text-low font-normal lowercase">
+                          {linkedGitHubIssue.state}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-half text-xs text-low truncate">
+                      {linkedGitHubIssue.repoFullName}
+                    </div>
+                    {linkedGitHubIssue.latestPrNumber && (
+                      <div className="mt-half text-xs text-low truncate">
+                        PR #{linkedGitHubIssue.latestPrNumber}
+                      </div>
+                    )}
+                    {linkedGitHubIssue.latestAgentCheckpoint && (
+                      <div className="mt-half text-xs text-low">
+                        {linkedGitHubIssue.latestAgentCheckpoint}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-half shrink-0">
+                    {onRefreshGitHubIssue && (
+                      <button
+                        type="button"
+                        onClick={onRefreshGitHubIssue}
+                        disabled={isRefreshingGitHubIssue}
+                        className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors disabled:opacity-50"
+                        aria-label="Refresh GitHub issue"
+                        title="Refresh GitHub issue"
+                      >
+                        <ArrowsClockwiseIcon
+                          className={cn(
+                            'size-icon-sm',
+                            isRefreshingGitHubIssue && 'animate-spin'
+                          )}
+                          weight="bold"
+                        />
+                      </button>
+                    )}
+                    {onManageGitHubIssueLink && (
+                      <button
+                        type="button"
+                        onClick={onManageGitHubIssueLink}
+                        className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors"
+                        aria-label="Manage GitHub link"
+                        title="Manage GitHub link"
+                      >
+                        <LinkIcon className="size-icon-sm" weight="bold" />
+                      </button>
+                    )}
+                    <a
+                      href={linkedGitHubIssue.issueUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors"
+                      aria-label="Open linked GitHub issue"
+                      title="Open linked GitHub issue"
+                    >
+                      <ArrowSquareOutIcon
+                        className="size-icon-sm"
+                        weight="bold"
+                      />
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={onManageGitHubIssueLink}
+                className="flex items-center gap-half rounded-sm border border-dashed border-border px-half py-half text-sm text-low hover:text-normal hover:bg-panel transition-colors"
+              >
+                <GithubLogoIcon className="size-icon-sm" weight="fill" />
+                Link GitHub issue
+              </button>
+            )}
+          </div>
+        )}
+
+        {(implicationAutopilotStatus || isImplicationAutopilotLoading) && (
+          <div className="px-base py-base border-b">
+            <div className="rounded-md border border-border bg-muted/20 px-base py-base">
+              <div className="flex items-start justify-between gap-base">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-half text-sm font-medium text-high">
+                    <RobotIcon className="size-icon-sm" weight="bold" />
+                    <span>Implication autopilot</span>
+                    {implicationAutopilotStatus?.daemonized === false && (
+                      <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
+                        status slice
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-half grid grid-cols-2 gap-x-base gap-y-half text-xs">
+                    <AutopilotFact
+                      label="Implementation"
+                      value={
+                        implicationAutopilotStatus?.implementationState ??
+                        'loading'
+                      }
+                    />
+                    <AutopilotFact
+                      label="Review"
+                      value={
+                        implicationAutopilotStatus?.autoReviewState ?? 'loading'
+                      }
+                    />
+                    <AutopilotFact
+                      label="Decision"
+                      value={
+                        implicationAutopilotStatus?.latestReviewDecision ??
+                        'loading'
+                      }
+                    />
+                    <AutopilotFact
+                      label="Fix"
+                      value={
+                        implicationAutopilotStatus?.reviewFixState ?? 'loading'
+                      }
+                    />
+                    <AutopilotFact
+                      label="PR/Merge"
+                      value={
+                        implicationAutopilotStatus?.prMergeState ?? 'loading'
+                      }
+                    />
+                    <AutopilotFact
+                      label="Next"
+                      value={
+                        implicationAutopilotStatus?.nextActionLabel ??
+                        'loading'
+                      }
+                    />
+                  </div>
+                  {implicationAutopilotStatus?.nextActionDescription && (
+                    <p className="mt-half text-xs text-low">
+                      {implicationAutopilotStatus.nextActionDescription}
+                    </p>
+                  )}
+                  {implicationAutopilotStatus?.latestReviewExcerpt && (
+                    <p className="mt-half line-clamp-3 text-xs text-low">
+                      {implicationAutopilotStatus.latestReviewExcerpt}
+                    </p>
+                  )}
+                  {implicationAutopilotStatus?.blocker && (
+                    <p className="mt-half text-xs text-warning">
+                      {implicationAutopilotStatus.blocker}
+                    </p>
+                  )}
+                  {implicationAutopilotStatus && (
+                    <p className="mt-half text-[11px] text-low">
+                      Uses Vibe Kanban Codex review sessions with{' '}
+                      {implicationAutopilotStatus.defaultModel},{' '}
+                      {implicationAutopilotStatus.defaultReasoning} reasoning
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-half">
+                  {onRefreshImplicationAutopilot && (
+                    <button
+                      type="button"
+                      onClick={onRefreshImplicationAutopilot}
+                      className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors"
+                      aria-label="Refresh autopilot status"
+                      title="Refresh autopilot status"
+                    >
+                      <ArrowsClockwiseIcon
+                        className="size-icon-sm"
+                        weight="bold"
+                      />
+                    </button>
+                  )}
+                  {onStartImplicationAutoReview &&
+                    implicationAutopilotStatus?.nextAction ===
+                      'start_auto_review' && (
+                      <button
+                        type="button"
+                        onClick={onStartImplicationAutoReview}
+                        disabled={isStartingImplicationAutoReview}
+                        className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                      >
+                        <PlayIcon className="size-icon-xs" weight="bold" />
+                        Start review
+                      </button>
+                    )}
+                  {onStartImplicationReviewFix &&
+                    implicationAutopilotStatus?.nextAction ===
+                      'start_review_fix' && (
+                      <button
+                        type="button"
+                        onClick={onStartImplicationReviewFix}
+                        disabled={isStartingImplicationReviewFix}
+                        className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                      >
+                        <PlayIcon className="size-icon-xs" weight="bold" />
+                        Start review fix
+                      </button>
+                    )}
+                  {implicationAutopilotStatus?.nextAction ===
+                    'ready_for_merge' && (
+                    <button
+                      type="button"
+                      onClick={onOpenImplicationMergeHandoff}
+                      disabled={!onOpenImplicationMergeHandoff}
+                      className="inline-flex items-center gap-half rounded-sm border border-success px-half py-half text-xs text-success hover:bg-success/10 disabled:border-border disabled:text-low disabled:opacity-70"
+                      title={
+                        onOpenImplicationMergeHandoff
+                          ? 'Open the linked PR for manual merge handoff.'
+                          : 'Review passed. Open the workspace Git controls or linked PR to merge manually.'
+                      }
+                    >
+                      <ArrowSquareOutIcon
+                        className="size-icon-xs"
+                        weight="bold"
+                      />
+                      Ready to merge
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Title and Description */}
         <div className="rounded-sm">

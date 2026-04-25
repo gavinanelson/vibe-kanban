@@ -44,6 +44,7 @@ import type { RepoWithTargetBranch } from 'shared/types';
 import { ChatEmptyState } from '@vibe/ui/components/ChatEmptyState';
 import { ChatScriptPlaceholder } from '@vibe/ui/components/ChatScriptPlaceholder';
 import { ScriptFixerDialog } from '@/shared/dialogs/scripts/ScriptFixerDialog';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 
 interface ConversationListProps {
   attempt: WorkspaceWithSession;
@@ -152,9 +153,10 @@ export const ConversationList = forwardRef<
   ref
 ) {
   const { t } = useTranslation('common');
+  const hostId = useHostId();
   const repos = reposProp;
   const resetAction = useResetProcess(attempt.id, attempt.session?.id);
-  const conversationScopeKey = `${attempt.id}:${sessionScopeId ?? attempt.session?.id ?? 'new'}`;
+  const conversationScopeKey = `${hostId ?? 'local'}:${attempt.id}:${sessionScopeId ?? attempt.session?.id ?? 'new'}`;
   const [filteredEntries, setFilteredEntries] = useState<DisplayEntry[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
   const [loading, setLoading] = useState(true);

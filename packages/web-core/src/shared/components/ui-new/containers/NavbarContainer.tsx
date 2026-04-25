@@ -151,8 +151,6 @@ export function NavbarContainer({
 
   const { data: orgsData } = useUserOrganizations();
   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
-  const orgName =
-    orgsData?.organizations.find((o) => o.id === selectedOrgId)?.name ?? '';
 
   // Get action visibility context (includes all state for visibility/active/enabled)
   const actionCtx = useActionVisibilityContext();
@@ -192,7 +190,7 @@ export function NavbarContainer({
   const navbarTitle = isCreateMode
     ? 'Create Workspace'
     : isOnProjectPage
-      ? orgName
+      ? undefined
       : selectedWorkspace?.branch;
 
   // Breadcrumbs: Project / Issue / Workspace (only on workspace pages with linked project)

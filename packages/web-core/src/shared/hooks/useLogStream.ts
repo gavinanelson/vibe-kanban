@@ -1,8 +1,27 @@
 import { useEffect, useState, useRef } from 'react';
 import type { PatchType } from 'shared/types';
 import { openLocalApiWebSocket } from '@/shared/lib/localApiTransport';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 
 type LogEntry = Extract<PatchType, { type: 'STDOUT' } | { type: 'STDERR' }>;
+
+const MAX_LOG_ENTRIES = 2_000;
+const MAX_LOG_CHARS = 1_000_000;
+
+const trimLogEntries = (entries: LogEntry[]): LogEntry[] => {
+  if (entries.length <= MAX_LOG_ENTRIES) {
+    let chars = 0;
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      chars += entries[i]?.content.length ?? 0;
+      if (chars > MAX_LOG_CHARS) {
+        return entries.slice(i + 1);
+      }
+    }
+    return entries;
+  }
+
+  return trimLogEntries(entries.slice(-MAX_LOG_ENTRIES));
+};
 
 interface UseLogStreamResult {
   logs: LogEntry[];
@@ -10,6 +29,7 @@ interface UseLogStreamResult {
 }
 
 export const useLogStream = (processId: string): UseLogStreamResult => {
+  const hostId = useHostId();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -47,7 +67,11 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
       void (async () => {
         try {
           const ws = await openLocalApiWebSocket(
-            `/api/execution-processes/${processId}/raw-logs/ws`
+            `/api/execution-processes/${processId}/raw-logs/ws`,
+            {
+              hostScope: 'explicit',
+              hostId,
+            }
           );
 
           if (cancelled || currentProcessIdRef.current !== capturedProcessId) {
@@ -92,9 +116,9 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
               // First entry after reconnect: replace old logs to avoid
               // duplicates from the history replay.
               pendingReplace = false;
-              setLogs([entry]);
+              setLogs(trimLogEntries([entry]));
             } else {
-              setLogs((prev) => [...prev, entry]);
+              setLogs((prev) => trimLogEntries([...prev, entry]));
             }
           };
 
@@ -186,7 +210,7 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
         retryTimerRef.current = null;
       }
     };
-  }, [processId]);
+  }, [processId, hostId]);
 
   return { logs, error };
 };

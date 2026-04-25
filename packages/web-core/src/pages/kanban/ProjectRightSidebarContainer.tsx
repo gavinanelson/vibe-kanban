@@ -30,6 +30,10 @@ import { createWorkspaceWithSession } from '@/shared/types/attempt';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentKanbanRouteState } from '@/shared/hooks/useCurrentKanbanRouteState';
 import {
+  HostIdScopeProvider,
+  useHostId,
+} from '@/shared/providers/HostIdProvider';
+import {
   buildKanbanIssueComposerKey,
   closeKanbanIssueComposer,
   useKanbanIssueComposer,
@@ -358,6 +362,7 @@ function WorkspaceSessionPanel({
 
 export function ProjectRightSidebarContainer() {
   const appNavigation = useAppNavigation();
+  const inheritedHostId = useHostId();
   const {
     projectId,
     getIssue,
@@ -551,11 +556,20 @@ export function ProjectRightSidebarContainer() {
   }
 
   if (rightPanelState.kind === 'issue-workspace') {
-    return (
+    const effectiveHostId = routeState.hostId ?? inheritedHostId;
+    const panel = (
       <WorkspaceSessionPanel
         workspaceId={rightPanelState.workspaceId}
         onClose={closePanel}
       />
+    );
+
+    return effectiveHostId ? (
+      <HostIdScopeProvider hostId={effectiveHostId}>
+        {panel}
+      </HostIdScopeProvider>
+    ) : (
+      panel
     );
   }
 
