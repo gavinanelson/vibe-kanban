@@ -72,6 +72,10 @@ import {
   useKanbanIssueComposerStore,
 } from '@/shared/stores/useKanbanIssueComposerStore';
 import { getProjectDefaultGitHubRepo } from '@/shared/lib/projectGitHubDefaults';
+import {
+  formatImplicationAutopilotValue,
+  getImplicationAutopilotNextActionDisplay,
+} from '@/shared/lib/implicationAutopilotPresentation';
 
 interface KanbanIssuePanelContainerProps {
   issueResolution: 'resolving' | 'ready' | 'missing' | null;
@@ -349,13 +353,17 @@ export function KanbanIssuePanelContainer({
   const implicationAutopilotPanelStatus = useMemo(() => {
     if (!shouldShowImplicationAutopilot) return null;
     if (!selectedIssueLocalWorkspaceId) {
+      const nextActionDisplay =
+        getImplicationAutopilotNextActionDisplay('no_workspace');
       return {
-        implementationState: 'missing',
-        autoReviewState: 'missing',
-        latestReviewDecision: 'missing',
-        reviewFixState: 'not_started',
-        prMergeState: 'no_workspace',
+        implementationState: 'Missing',
+        autoReviewState: 'Missing',
+        latestReviewDecision: 'Missing',
+        reviewFixState: 'Not started',
+        prMergeState: 'No workspace',
         nextAction: 'no_workspace',
+        nextActionLabel: nextActionDisplay.label,
+        nextActionDescription: nextActionDisplay.description,
         blocker: 'No local workspace is linked to this Implication issue yet.',
         defaultModel: 'gpt-5.5',
         defaultReasoning: 'medium',
@@ -365,15 +373,26 @@ export function KanbanIssuePanelContainer({
 
     const data = autopilotStatusQuery.data;
     if (!data) return null;
+    const nextActionDisplay = getImplicationAutopilotNextActionDisplay(
+      data.next_action
+    );
 
     return {
-      implementationState: data.implementation_state,
-      autoReviewState: data.auto_review_state,
-      latestReviewDecision: data.latest_review_decision,
+      implementationState: formatImplicationAutopilotValue(
+        data.implementation_state
+      ),
+      autoReviewState: formatImplicationAutopilotValue(
+        data.auto_review_state
+      ),
+      latestReviewDecision: formatImplicationAutopilotValue(
+        data.latest_review_decision
+      ),
       latestReviewExcerpt: data.latest_review_excerpt,
-      reviewFixState: data.review_fix_state,
-      prMergeState: data.pr_merge_state,
+      reviewFixState: formatImplicationAutopilotValue(data.review_fix_state),
+      prMergeState: formatImplicationAutopilotValue(data.pr_merge_state),
       nextAction: data.next_action,
+      nextActionLabel: nextActionDisplay.label,
+      nextActionDescription: nextActionDisplay.description,
       blocker: data.blocker,
       defaultModel: data.default_model,
       defaultReasoning: data.default_reasoning,

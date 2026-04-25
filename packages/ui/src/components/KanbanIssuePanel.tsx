@@ -75,6 +75,8 @@ export interface ImplicationAutopilotPanelStatus {
   reviewFixState: string;
   prMergeState: string;
   nextAction: string;
+  nextActionLabel: string;
+  nextActionDescription: string;
   blocker?: string | null;
   defaultModel: string;
   defaultReasoning: string;
@@ -493,7 +495,7 @@ export function KanbanIssuePanel({
                 <div className="min-w-0">
                   <div className="flex items-center gap-half text-sm font-medium text-high">
                     <RobotIcon className="size-icon-sm" weight="bold" />
-                    <span>Implication Codex auto-review</span>
+                    <span>Implication autopilot</span>
                     {implicationAutopilotStatus?.daemonized === false && (
                       <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
                         status slice
@@ -536,10 +538,16 @@ export function KanbanIssuePanel({
                     <AutopilotFact
                       label="Next"
                       value={
-                        implicationAutopilotStatus?.nextAction ?? 'loading'
+                        implicationAutopilotStatus?.nextActionLabel ??
+                        'loading'
                       }
                     />
                   </div>
+                  {implicationAutopilotStatus?.nextActionDescription && (
+                    <p className="mt-half text-xs text-low">
+                      {implicationAutopilotStatus.nextActionDescription}
+                    </p>
+                  )}
                   {implicationAutopilotStatus?.latestReviewExcerpt && (
                     <p className="mt-half line-clamp-3 text-xs text-low">
                       {implicationAutopilotStatus.latestReviewExcerpt}
@@ -552,7 +560,7 @@ export function KanbanIssuePanel({
                   )}
                   {implicationAutopilotStatus && (
                     <p className="mt-half text-[11px] text-low">
-                      Uses Codex Auto-review with{' '}
+                      Uses Vibe Kanban Codex review sessions with{' '}
                       {implicationAutopilotStatus.defaultModel},{' '}
                       {implicationAutopilotStatus.defaultReasoning} reasoning
                     </p>
