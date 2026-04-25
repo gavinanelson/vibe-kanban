@@ -185,7 +185,7 @@ export function KanbanContainer() {
     membersWithProfilesById,
     isLoading: orgLoading,
   } = useOrgContext();
-  const { activeWorkspaces } = useWorkspaceContext();
+  const { activeWorkspaces, isWorkspacesListLoading } = useWorkspaceContext();
   const { userId } = useAuth();
   const effectiveHostId = useHostId();
   const autoReviewTransitionsRef = useRef<Set<string>>(new Set());
@@ -690,6 +690,10 @@ export function KanbanContainer() {
 
   const startAutoReviewForIssue = useCallback(
     async (issueId: string) => {
+      if (isWorkspacesListLoading) {
+        return;
+      }
+
       const hostId = effectiveHostId;
       const localWorkspaceId = getAutoReviewLocalWorkspaceId(
         getWorkspacesForIssue(issueId),
@@ -789,6 +793,7 @@ export function KanbanContainer() {
       effectiveHostId,
       getTagObjectsForIssue,
       getWorkspacesForIssue,
+      isWorkspacesListLoading,
       localWorkspacesById,
     ]
   );
