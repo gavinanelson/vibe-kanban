@@ -150,11 +150,14 @@ const ResolveConflictsDialogImpl = create<ResolveConflictsDialogProps>(
 
         // Create new session if user selected that option or no existing session
         if (creatingNewSession) {
-          const session = await sessionsApi.create({
-            workspace_id: workspaceId,
-            executor: effectiveProfile.executor,
-            name: t('resolveConflicts.dialog.sessionName'),
-          });
+          const session = await sessionsApi.create(
+            {
+              workspace_id: workspaceId,
+              executor: effectiveProfile.executor,
+              name: t('resolveConflicts.dialog.sessionName'),
+            },
+            hostId
+          );
           targetSessionId = session.id;
         }
 
@@ -165,16 +168,20 @@ const ResolveConflictsDialogImpl = create<ResolveConflictsDialogProps>(
         }
 
         // Send follow-up with conflict resolution instructions
-        await sessionsApi.followUp(targetSessionId, {
-          prompt: conflictInstructions,
-          executor_config: {
-            executor: effectiveProfile.executor,
-            variant: effectiveProfile.variant,
+        await sessionsApi.followUp(
+          targetSessionId,
+          {
+            prompt: conflictInstructions,
+            executor_config: {
+              executor: effectiveProfile.executor,
+              variant: effectiveProfile.variant,
+            },
+            retry_process_id: null,
+            force_when_dirty: null,
+            perform_git_reset: null,
           },
-          retry_process_id: null,
-          force_when_dirty: null,
-          perform_git_reset: null,
-        });
+          hostId
+        );
 
         // Invalidate queries and wait for them to complete
         await Promise.all([

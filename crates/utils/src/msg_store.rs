@@ -9,8 +9,10 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 use crate::{log_msg::LogMsg, stream_lines::LinesStreamExt};
 
-// 100 MB Limit
-const HISTORY_BYTES: usize = 100000 * 1024;
+// Keep a bounded tail of live process output in memory. The UI runs inside
+// WebKit on Gavin's 16GB laptop; retaining a full Codex raw stream in React
+// state can make one native app window balloon into multi-GB RAM usage.
+const HISTORY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone)]
 struct StoredMsg {

@@ -41,7 +41,13 @@ import {
   type ProjectIssueCreateOptions,
   useKanbanIssueComposer,
 } from '@/shared/stores/useKanbanIssueComposerStore';
-import type { OrganizationMemberWithProfile } from 'shared/types';
+import {
+  BaseCodingAgent,
+  PermissionPolicy,
+  type OrganizationMemberWithProfile,
+  type ReasoningEffort,
+} from 'shared/types';
+import { sessionsApi } from '@/shared/lib/api';
 import {
   KanbanProvider,
   KanbanBoard,
@@ -73,6 +79,12 @@ import type { IssuePriority } from 'shared/remote-types';
 import { useIssueMultiSelect } from '@/shared/hooks/useIssueMultiSelect';
 import { useIssueSelectionStore } from '@/shared/stores/useIssueSelectionStore';
 import { BulkActionBarContainer } from './BulkActionBarContainer';
+import { getGitHubIssueLink } from '@/shared/lib/githubIssueLink';
+import {
+  deriveAutoReviewStatus,
+  isReviewStatusName,
+  type PendingAutoReview,
+} from '@/shared/lib/autoReviewStatus';
 
 const areStringSetsEqual = (left: string[], right: string[]): boolean => {
   if (left.length !== right.length) {
@@ -108,6 +120,22 @@ const areKanbanFiltersEqual = (
     left.sortDirection === right.sortDirection
   );
 };
+
+const AUTO_REVIEW_SESSION_NAME = 'Auto review — Codex';
+const AUTO_REVIEW_PROMPT = [
+  'Review this workspace as an independent Codex reviewer.',
+  'Do not make implementation changes unless they are required to run verification or produce review evidence.',
+  'Check the diff against the linked GitHub issue, acceptance criteria, tests, and obvious regressions.',
+  'Return a concise review with: decision, blockers, non-blocking notes, validation evidence, and recommended next board/GitHub action.',
+].join('\n');
+
+const reviewReasoningForIssue = (
+  _tagObjects: Array<{
+    name?: string | null;
+    title?: string | null;
+    label?: string | null;
+  }>
+): ReasoningEffort => 'medium';
 
 function LoadingState() {
   const { t } = useTranslation('common');
@@ -157,6 +185,10 @@ export function KanbanContainer() {
   } = useOrgContext();
   const { activeWorkspaces } = useWorkspaceContext();
   const { userId } = useAuth();
+  const autoReviewTransitionsRef = useRef<Set<string>>(new Set());
+  const previousIssueStatusByIdRef = useRef<Map<string, string> | null>(null);
+  const [pendingAutoReviewsByIssueId, setPendingAutoReviewsByIssueId] =
+    useState<Record<string, PendingAutoReview>>({});
 
   // Get project name by finding the project matching current projectId
   const projectName = projects.find((p) => p.id === projectId)?.name ?? '';
@@ -625,6 +657,13 @@ export function KanbanContainer() {
             hasUnseenActivity: localWorkspace?.hasUnseenActivity,
             latestProcessCompletedAt: localWorkspace?.latestProcessCompletedAt,
             latestProcessStatus: localWorkspace?.latestProcessStatus,
+            autoReviewStatus: deriveAutoReviewStatus({
+              issueStatusName: issue.status_id
+                ? statuses.find((status) => status.id === issue.status_id)?.name
+                : null,
+              workspace: localWorkspace,
+              pendingReview: pendingAutoReviewsByIssueId[issue.id] ?? null,
+            }),
           };
         });
 
@@ -642,7 +681,191 @@ export function KanbanContainer() {
     prsByWorkspaceId,
     membersWithProfilesById,
     userId,
+    statuses,
+    pendingAutoReviewsByIssueId,
   ]);
+
+  const startAutoReviewForIssue = useCallback(
+    async (issueId: string) => {
+      const hostId = routeState.hostId;
+      if (!hostId) {
+        console.warn('Skipping auto-review: no remote host is selected', {
+          issueId,
+        });
+        return;
+      }
+      const workspacesForIssue = getWorkspacesForIssue(issueId).filter(
+        (workspace) => !workspace.archived && workspace.local_workspace_id
+      );
+      const workspace = workspacesForIssue[0];
+      const localWorkspaceId = workspace?.local_workspace_id;
+      if (!localWorkspaceId) {
+        console.warn(
+          'Skipping auto-review: issue has no linked local workspace',
+          {
+            issueId,
+          }
+        );
+        return;
+      }
+
+      const transitionKey = `${issueId}:${localWorkspaceId}`;
+      if (autoReviewTransitionsRef.current.has(transitionKey)) {
+        return;
+      }
+      autoReviewTransitionsRef.current.add(transitionKey);
+      const requestedAt = new Date().toISOString();
+      setPendingAutoReviewsByIssueId((current) => ({
+        ...current,
+        [issueId]: {
+          state: 'starting',
+          localWorkspaceId,
+          requestedAt,
+        },
+      }));
+
+      try {
+        const tagObjects = getTagObjectsForIssue(issueId);
+        const reasoning = reviewReasoningForIssue(tagObjects);
+        const session = await sessionsApi.create(
+          {
+            workspace_id: localWorkspaceId,
+            executor: BaseCodingAgent.CODEX,
+            name: `${AUTO_REVIEW_SESSION_NAME} (${reasoning})`,
+          },
+          hostId
+        );
+        setPendingAutoReviewsByIssueId((current) => ({
+          ...current,
+          [issueId]: {
+            ...(current[issueId] ?? {}),
+            state: 'running',
+            localWorkspaceId,
+            sessionId: session.id,
+            requestedAt,
+          },
+        }));
+
+        const process = await sessionsApi.startReview(
+          session.id,
+          {
+            executor_config: {
+              executor: BaseCodingAgent.CODEX,
+              variant: 'DEFAULT',
+              model_id: 'gpt-5.5',
+              reasoning_id: reasoning,
+              permission_policy: PermissionPolicy.AUTO,
+            },
+            additional_prompt: AUTO_REVIEW_PROMPT,
+            use_all_workspace_commits: true,
+          },
+          hostId
+        );
+        setPendingAutoReviewsByIssueId((current) => ({
+          ...current,
+          [issueId]: {
+            ...(current[issueId] ?? {}),
+            state: 'running',
+            localWorkspaceId,
+            sessionId: session.id,
+            processId: process.id,
+            requestedAt,
+          },
+        }));
+      } catch (error) {
+        autoReviewTransitionsRef.current.delete(transitionKey);
+        setPendingAutoReviewsByIssueId((current) => ({
+          ...current,
+          [issueId]: {
+            ...(current[issueId] ?? {}),
+            state: 'failed',
+            localWorkspaceId,
+            requestedAt,
+          },
+        }));
+        console.error('Failed to start auto-review for Kanban issue', {
+          issueId,
+          error,
+        });
+      }
+    },
+    [getTagObjectsForIssue, getWorkspacesForIssue, routeState.hostId]
+  );
+
+  useEffect(() => {
+    setPendingAutoReviewsByIssueId((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      for (const [issueId, pendingReview] of Object.entries(current)) {
+        const localWorkspaceId = pendingReview.localWorkspaceId;
+        if (!localWorkspaceId) {
+          continue;
+        }
+
+        const localWorkspace = localWorkspacesById.get(localWorkspaceId);
+        if (!localWorkspace) {
+          continue;
+        }
+
+        const derivedStatus = deriveAutoReviewStatus({
+          workspace: localWorkspace,
+          pendingReview,
+        });
+
+        if (
+          derivedStatus &&
+          derivedStatus.state !== pendingReview.state &&
+          (derivedStatus.state === 'running' ||
+            derivedStatus.state === 'completed' ||
+            derivedStatus.state === 'failed')
+        ) {
+          next[issueId] = {
+            ...pendingReview,
+            state: derivedStatus.state,
+          };
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [localWorkspacesById]);
+
+  useEffect(() => {
+    const currentStatuses = new Map(
+      issues.map((issue) => [issue.id, issue.status_id])
+    );
+    const previousStatuses = previousIssueStatusByIdRef.current;
+    previousIssueStatusByIdRef.current = currentStatuses;
+
+    // Seed the previous-status map on first load without firing reviews for
+    // cards that were already waiting in review before this client mounted.
+    if (!previousStatuses) {
+      return;
+    }
+
+    const reviewStatusIds = new Set(
+      statuses
+        .filter((status) => isReviewStatusName(status.name))
+        .map((status) => status.id)
+    );
+
+    if (reviewStatusIds.size === 0) {
+      return;
+    }
+
+    for (const issue of issues) {
+      const previousStatusId = previousStatuses.get(issue.id);
+      if (
+        previousStatusId &&
+        previousStatusId !== issue.status_id &&
+        reviewStatusIds.has(issue.status_id)
+      ) {
+        void startAutoReviewForIssue(issue.id);
+      }
+    }
+  }, [issues, statuses, startAutoReviewForIssue]);
 
   // Calculate sort_order based on column index and issue position
   // Formula: 1000 * [COLUMN_INDEX] + [ISSUE_INDEX] (both 1-based)
@@ -684,9 +907,11 @@ export function KanbanContainer() {
 
       // Update local state and capture new items for bulk update
       let newItems: Record<string, string[]> = {};
+      let movedIssueId: string | null = null;
       setItems((prev) => {
         const sourceItems = [...(prev[sourceId] ?? [])];
         const [moved] = sourceItems.splice(source.index, 1);
+        movedIssueId = moved ?? null;
 
         if (!isCrossColumn) {
           // Within-column reorder
@@ -736,6 +961,19 @@ export function KanbanContainer() {
       // Perform bulk update
       isSyncingRef.current = true;
       bulkUpdateIssues(updates)
+        .then(() => {
+          const destinationStatus = statuses.find(
+            (status) => status.id === destId
+          );
+          if (
+            isCrossColumn &&
+            movedIssueId &&
+            destinationStatus &&
+            isReviewStatusName(destinationStatus.name)
+          ) {
+            void startAutoReviewForIssue(movedIssueId);
+          }
+        })
         .catch((err) => {
           console.error('Failed to bulk update sort order:', err);
         })
@@ -746,7 +984,12 @@ export function KanbanContainer() {
           }, 500);
         });
     },
-    [kanbanFilters.sortField, calculateSortOrder]
+    [
+      kanbanFilters.sortField,
+      calculateSortOrder,
+      statuses,
+      startAutoReviewForIssue,
+    ]
   );
 
   // Multi-select support
@@ -894,15 +1137,15 @@ export function KanbanContainer() {
   }
 
   return (
-    <div className="flex flex-col h-full space-y-base">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden gap-half">
       <div
         className={cn(
-          'px-double pt-double space-y-base',
+          'px-base pt-base space-y-half',
           isMobile && 'px-base pt-base'
         )}
       >
         <div className="flex items-center gap-half">
-          <h2 className={cn('text-2xl font-medium', isMobile && 'text-lg')}>
+          <h2 className={cn('text-xl font-medium', isMobile && 'text-lg')}>
             {projectName}
           </h2>
 
@@ -980,21 +1223,24 @@ export function KanbanContainer() {
             <p className="text-low">{t('kanban.noVisibleStatuses')}</p>
           </div>
         ) : (
-          <div className="flex-1 overflow-x-auto px-double">
-            <KanbanProvider onDragEnd={handleDragEnd}>
+          <div className="min-h-0 min-w-0 flex-1 overflow-hidden px-px pb-px">
+            <KanbanProvider
+              onDragEnd={handleDragEnd}
+              columnCount={visibleStatuses.length}
+            >
               {visibleStatuses.map((status) => {
                 const issueIds = items[status.id] ?? [];
 
                 return (
-                  <KanbanBoard key={status.id}>
+                  <KanbanBoard key={status.id} className="min-w-0">
                     <KanbanHeader>
-                      <div className="border-t sticky border-b top-0 z-20 flex shrink-0 items-center justify-between gap-2 p-base bg-secondary">
-                        <div className="flex items-center gap-2">
+                      <div className="border-t sticky border-b top-0 z-20 flex shrink-0 items-center justify-between gap-1 px-half py-px bg-secondary">
+                        <div className="flex min-w-0 items-center gap-2">
                           <div
                             className="h-2 w-2 rounded-full shrink-0"
                             style={{ backgroundColor: `hsl(${status.color})` }}
                           />
-                          <p className="m-0 text-sm">{status.name}</p>
+                          <p className="m-0 truncate text-sm">{status.name}</p>
                         </div>
                         <button
                           type="button"
@@ -1006,7 +1252,10 @@ export function KanbanContainer() {
                         </button>
                       </div>
                     </KanbanHeader>
-                    <KanbanCards id={status.id}>
+                    <KanbanCards
+                      id={status.id}
+                      className="min-h-0 overflow-y-auto"
+                    >
                       {issueIds.map((issueId, index) => {
                         const issue = issueMap[issueId];
                         if (!issue) return null;
@@ -1026,6 +1275,25 @@ export function KanbanContainer() {
                           // do not render it again at the issue level.
                           return !workspaceIdsShownOnCard.has(pr.workspace_id);
                         });
+                        const primaryLocalWorkspace =
+                          getWorkspacesForIssue(issue.id)
+                            .filter(
+                              (workspace) =>
+                                !workspace.archived &&
+                                !!workspace.local_workspace_id
+                            )
+                            .map((workspace) =>
+                              localWorkspacesById.get(
+                                workspace.local_workspace_id!
+                              )
+                            )
+                            .find(Boolean) ?? null;
+                        const autoReviewStatus = deriveAutoReviewStatus({
+                          issueStatusName: status.name,
+                          workspace: primaryLocalWorkspace,
+                          pendingReview:
+                            pendingAutoReviewsByIssueId[issue.id] ?? null,
+                        });
 
                         return (
                           <KanbanCard
@@ -1033,7 +1301,7 @@ export function KanbanContainer() {
                             id={issue.id}
                             name={issue.title}
                             index={index}
-                            className="group"
+                            className="group p-half"
                             onClick={(e) => handleCardClick(issue.id, e)}
                             isOpen={selectedKanbanIssueId === issue.id}
                             isMobile={isMobile}
@@ -1045,6 +1313,20 @@ export function KanbanContainer() {
                               title={issue.title}
                               description={issue.description}
                               priority={issue.priority}
+                              githubIssue={(() => {
+                                const githubLink = getGitHubIssueLink(
+                                  issue.extension_metadata
+                                );
+                                return githubLink
+                                  ? {
+                                      issueNumber: githubLink.issue_number,
+                                      state: githubLink.last_seen_state,
+                                      latestPrNumber:
+                                        githubLink.latest_pr_number ?? null,
+                                    }
+                                  : null;
+                              })()}
+                              autoReviewStatus={autoReviewStatus}
                               tags={getTagObjectsForIssue(issue.id)}
                               assignees={issueAssigneesMap[issue.id] ?? []}
                               pullRequests={issueCardPullRequests}

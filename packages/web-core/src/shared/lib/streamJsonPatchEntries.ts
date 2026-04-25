@@ -2,12 +2,17 @@
 import { produce } from 'immer';
 import type { Operation } from 'rfc6902';
 import { applyUpsertPatch } from '@/shared/lib/jsonPatch';
-import { openLocalApiWebSocket } from '@/shared/lib/localApiTransport';
+import {
+  openLocalApiWebSocket,
+  type LocalApiHostScope,
+} from '@/shared/lib/localApiTransport';
 
 type PatchContainer<E = unknown> = { entries: E[] };
 
 export interface StreamOptions<E = unknown> {
   initial?: PatchContainer<E>;
+  hostId?: string | null;
+  hostScope?: LocalApiHostScope;
   /** called after each successful patch application */
   onEntries?: (entries: E[]) => void;
   onConnect?: () => void;
@@ -109,7 +114,12 @@ export function streamJsonPatchEntries<E = unknown>(
 
   void (async () => {
     try {
-      const opened = await openLocalApiWebSocket(url);
+      const opened = await openLocalApiWebSocket(url, {
+        hostScope:
+          opts.hostScope ??
+          (opts.hostId !== undefined ? 'explicit' : undefined),
+        hostId: opts.hostId,
+      });
 
       if (closed) {
         opened.close();

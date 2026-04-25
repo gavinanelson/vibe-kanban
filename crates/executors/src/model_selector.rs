@@ -102,7 +102,7 @@ impl ReasoningOption {
             .into_iter()
             .map(|(id, label)| {
                 let label = label.unwrap_or_else(|| reasoning_label(&id));
-                let is_default = id.eq_ignore_ascii_case("high");
+                let is_default = id.eq_ignore_ascii_case("medium");
                 ReasoningOption {
                     id,
                     label,

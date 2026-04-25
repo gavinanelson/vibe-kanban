@@ -43,6 +43,10 @@ export interface WorkspaceWithStats {
   hasUnseenActivity?: boolean;
   latestProcessCompletedAt?: string;
   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+  autoReviewStatus?: {
+    state: 'starting' | 'running' | 'completed' | 'failed';
+    label: string;
+  } | null;
 }
 
 export interface IssueWorkspaceCardProps {
@@ -247,6 +251,28 @@ export function IssueWorkspaceCard({
 
           {hasLiveStatusIndicator && (
             <span className="text-low/50 shrink-0">·</span>
+          )}
+
+          {workspace.autoReviewStatus && (
+            <>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium shrink-0',
+                  workspace.autoReviewStatus.state === 'failed'
+                    ? 'border-error/30 bg-error/10 text-error'
+                    : workspace.autoReviewStatus.state === 'completed'
+                      ? 'border-success/30 bg-success/10 text-success'
+                      : 'border-brand/30 bg-brand/10 text-brand'
+                )}
+              >
+                {workspace.autoReviewStatus.state === 'starting' ||
+                workspace.autoReviewStatus.state === 'running' ? (
+                  <RunningDots />
+                ) : null}
+                {workspace.autoReviewStatus.label}
+              </span>
+              <span className="text-low/50 shrink-0">·</span>
+            </>
           )}
 
           <span className="whitespace-nowrap shrink-0">{timeAgo}</span>

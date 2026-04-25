@@ -45,7 +45,7 @@ export function useWorkspaceSessions(
 
   const { data: sessions = [], isLoading } = useQuery<Session[]>({
     queryKey: workspaceSessionKeys.byWorkspace(workspaceId, hostId),
-    queryFn: () => sessionsApi.getByWorkspace(workspaceId!),
+    queryFn: () => sessionsApi.getByWorkspace(workspaceId!, hostId),
     enabled: enabled && !!workspaceId,
   });
 

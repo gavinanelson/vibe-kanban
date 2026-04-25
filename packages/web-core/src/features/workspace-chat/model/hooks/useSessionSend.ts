@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { ExecutorConfig } from 'shared/types';
 import { sessionsApi } from '@/shared/lib/api';
 import { useCreateSession } from './useCreateSession';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 
 interface UseSessionSendOptions {
   /** Session ID for existing sessions */
@@ -45,6 +46,7 @@ export function useSessionSend({
 }: UseSessionSendOptions): UseSessionSendResult {
   const { mutateAsync: createSession, isPending: isCreatingSession } =
     useCreateSession();
+  const hostId = useHostId();
   const [isSendingFollowUp, setIsSendingFollowUp] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,13 +87,17 @@ export function useSessionSend({
         if (!sessionId) return false;
         setIsSendingFollowUp(true);
         try {
-          await sessionsApi.followUp(sessionId, {
-            prompt: trimmed,
-            executor_config: executorConfig,
-            retry_process_id: null,
-            force_when_dirty: null,
-            perform_git_reset: null,
-          });
+          await sessionsApi.followUp(
+            sessionId,
+            {
+              prompt: trimmed,
+              executor_config: executorConfig,
+              retry_process_id: null,
+              force_when_dirty: null,
+              perform_git_reset: null,
+            },
+            hostId
+          );
           return true;
         } catch (e: unknown) {
           const err = e as { message?: string };
@@ -109,6 +115,7 @@ export function useSessionSend({
       createSession,
       onSelectSession,
       executorConfig,
+      hostId,
     ]
   );
 

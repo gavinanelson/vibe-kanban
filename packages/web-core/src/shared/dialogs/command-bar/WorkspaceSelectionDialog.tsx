@@ -13,6 +13,7 @@ import {
   buildWorkspaceCreateInitialState,
   buildWorkspaceCreatePrompt,
 } from '@/shared/lib/workspaceCreateState';
+import { getGitHubIssueLink } from '@/shared/lib/githubIssueLink';
 import {
   Command,
   CommandDialog,
@@ -169,7 +170,8 @@ function WorkspaceSelectionContent({
       const issue = getIssue(issueId);
       const initialPrompt = buildWorkspaceCreatePrompt(
         issue?.title ?? null,
-        issue?.description ?? null
+        issue?.description ?? null,
+        getGitHubIssueLink(issue?.extension_metadata)
       );
 
       // Build set of local workspace IDs that exist on this machine

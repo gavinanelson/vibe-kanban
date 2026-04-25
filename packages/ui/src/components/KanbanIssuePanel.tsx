@@ -493,7 +493,7 @@ export function KanbanIssuePanel({
                 <div className="min-w-0">
                   <div className="flex items-center gap-half text-sm font-medium text-high">
                     <RobotIcon className="size-icon-sm" weight="bold" />
-                    <span>Implication autopilot</span>
+                    <span>Implication Codex auto-review</span>
                     {implicationAutopilotStatus?.daemonized === false && (
                       <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
                         status slice
@@ -552,7 +552,8 @@ export function KanbanIssuePanel({
                   )}
                   {implicationAutopilotStatus && (
                     <p className="mt-half text-[11px] text-low">
-                      Defaults: Codex {implicationAutopilotStatus.defaultModel},{' '}
+                      Uses Codex Auto-review with{' '}
+                      {implicationAutopilotStatus.defaultModel},{' '}
                       {implicationAutopilotStatus.defaultReasoning} reasoning
                     </p>
                   )}

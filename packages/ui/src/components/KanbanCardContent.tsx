@@ -7,6 +7,7 @@ import {
   CircleDashedIcon,
   DotsThreeIcon,
   PlusIcon,
+  GithubLogoIcon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
 import { PriorityIcon, type PriorityLevel } from './PriorityIcon';
@@ -36,6 +37,17 @@ export interface KanbanPullRequest {
   number: number;
   url: string;
   status: PrBadgeStatus;
+}
+
+export interface KanbanGitHubIssue {
+  issueNumber: number;
+  state?: string | null;
+  latestPrNumber?: number | null;
+}
+
+export interface KanbanAutoReviewStatus {
+  state: 'starting' | 'running' | 'completed' | 'failed';
+  label: string;
 }
 
 export interface TagEditRenderProps<TTag extends KanbanTag = KanbanTag> {
@@ -129,6 +141,8 @@ export type KanbanCardContentProps<TTag extends KanbanTag = KanbanTag> = {
   tags: KanbanTag[];
   assignees: KanbanAssigneeUser[];
   pullRequests?: KanbanPullRequest[];
+  githubIssue?: KanbanGitHubIssue | null;
+  autoReviewStatus?: KanbanAutoReviewStatus | null;
   relationships?: KanbanRelationship[];
   isSubIssue?: boolean;
   isLoading?: boolean;
@@ -148,6 +162,8 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
   tags,
   assignees,
   pullRequests = [],
+  githubIssue,
+  autoReviewStatus,
   relationships = [],
   isSubIssue,
   isLoading = false,
@@ -212,6 +228,17 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
           <span className="font-ibm-plex-mono text-sm text-low truncate">
             {displayId}
           </span>
+          {githubIssue && (
+            <span className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] text-low">
+              <GithubLogoIcon className="size-3" weight="fill" />
+              <span className="font-ibm-plex-mono">
+                #{githubIssue.issueNumber}
+              </span>
+              {githubIssue.latestPrNumber ? (
+                <span>PR #{githubIssue.latestPrNumber}</span>
+              ) : null}
+            </span>
+          )}
           {isLoading && <RunningDots />}
         </div>
         {onMoreActionsClick && (
@@ -238,7 +265,7 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
       </div>
 
       {/* Row 2: Title */}
-      <span className="text-base text-normal truncate">{title}</span>
+      <span className="text-sm text-normal truncate">{title}</span>
 
       {/* Row 3: Description (optional, truncated) */}
       {previewDescription && (
@@ -247,11 +274,32 @@ export function KanbanCardContent<TTag extends KanbanTag = KanbanTag>({
             'text-sm text-low m-0',
             isMobile
               ? 'leading-tight line-clamp-2'
-              : 'leading-relaxed line-clamp-4'
+              : 'leading-tight line-clamp-2'
           )}
         >
           {previewDescription}
         </p>
+      )}
+
+      {autoReviewStatus && (
+        <div className="flex items-center gap-half min-w-0">
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium',
+              autoReviewStatus.state === 'failed'
+                ? 'border-error/30 bg-error/10 text-error'
+                : autoReviewStatus.state === 'completed'
+                  ? 'border-success/30 bg-success/10 text-success'
+                  : 'border-brand/30 bg-brand/10 text-brand'
+            )}
+          >
+            {autoReviewStatus.state === 'starting' ||
+            autoReviewStatus.state === 'running' ? (
+              <RunningDots />
+            ) : null}
+            <span className="truncate">{autoReviewStatus.label}</span>
+          </span>
+        </div>
       )}
 
       {/* Row 4: Priority + Assignee */}

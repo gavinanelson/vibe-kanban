@@ -119,6 +119,28 @@ struct GhPrResponse {
     updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubIssueSummary {
+    pub repo_full_name: String,
+    pub issue_number: i64,
+    pub issue_url: String,
+    pub title: String,
+    pub state: String,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhIssueResponse {
+    number: i64,
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    state: String,
+    updated_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Error)]
 pub enum GhCliError {
     #[error("GitHub CLI (`gh`) executable not found or not runnable")]
@@ -357,6 +379,58 @@ impl GhCli {
             .collect())
     }
 
+    pub fn search_issues(
+        &self,
+        repo_full_name: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<GitHubIssueSummary>, GhCliError> {
+        let limit = limit.clamp(1, 50).to_string();
+
+        let mut args = vec![
+            "issue".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            repo_full_name.to_string(),
+            "--state".to_string(),
+            "open".to_string(),
+            "--limit".to_string(),
+            limit,
+            "--json".to_string(),
+            "number,url,title,state,updatedAt".to_string(),
+        ];
+
+        let trimmed_query = query.trim();
+        if !trimmed_query.is_empty() {
+            args.push("--search".to_string());
+            args.push(trimmed_query.to_string());
+        }
+
+        let raw = self.run(args, None)?;
+        Self::parse_issue_list(&raw, repo_full_name)
+    }
+
+    pub fn get_issue(
+        &self,
+        repo_full_name: &str,
+        issue_number: i64,
+    ) -> Result<GitHubIssueSummary, GhCliError> {
+        let raw = self.run(
+            [
+                "issue",
+                "view",
+                &issue_number.to_string(),
+                "--repo",
+                repo_full_name,
+                "--json",
+                "number,url,title,state,updatedAt",
+            ],
+            None,
+        )?;
+
+        Self::parse_issue(&raw, repo_full_name)
+    }
+
     /// Fetch comments for a pull request.
     pub fn get_pr_comments(
         &self,
@@ -507,6 +581,46 @@ impl GhCli {
             title: pr.title.unwrap_or_default(),
             base_branch: pr.base_ref_name.unwrap_or_default(),
             head_branch: pr.head_ref_name.unwrap_or_default(),
+        }
+    }
+
+    fn parse_issue_list(
+        raw: &str,
+        repo_full_name: &str,
+    ) -> Result<Vec<GitHubIssueSummary>, GhCliError> {
+        let issues: Vec<GhIssueResponse> = serde_json::from_str(raw.trim()).map_err(|err| {
+            GhCliError::UnexpectedOutput(format!(
+                "Failed to parse gh issue list response: {err}; raw: {raw}"
+            ))
+        })?;
+
+        Ok(issues
+            .into_iter()
+            .map(|issue| Self::issue_response_to_summary(issue, repo_full_name))
+            .collect())
+    }
+
+    fn parse_issue(raw: &str, repo_full_name: &str) -> Result<GitHubIssueSummary, GhCliError> {
+        let issue: GhIssueResponse = serde_json::from_str(raw.trim()).map_err(|err| {
+            GhCliError::UnexpectedOutput(format!(
+                "Failed to parse gh issue view response: {err}; raw: {raw}"
+            ))
+        })?;
+
+        Ok(Self::issue_response_to_summary(issue, repo_full_name))
+    }
+
+    fn issue_response_to_summary(
+        issue: GhIssueResponse,
+        repo_full_name: &str,
+    ) -> GitHubIssueSummary {
+        GitHubIssueSummary {
+            repo_full_name: repo_full_name.to_string(),
+            issue_number: issue.number,
+            issue_url: issue.url,
+            title: issue.title,
+            state: issue.state,
+            updated_at: issue.updated_at,
         }
     }
 

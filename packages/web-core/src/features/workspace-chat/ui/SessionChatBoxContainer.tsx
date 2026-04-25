@@ -178,7 +178,7 @@ export function SessionChatBoxContainer(props: SessionChatBoxContainerProps) {
       void RenameSessionDialog.show({
         currentName,
         onRename: async (newName: string) => {
-          await sessionsApi.update(targetSessionId, { name: newName });
+          await sessionsApi.update(targetSessionId, { name: newName }, hostId);
           void queryClient.invalidateQueries({
             queryKey: workspaceSessionKeys.byWorkspace(workspaceId, hostId),
           });

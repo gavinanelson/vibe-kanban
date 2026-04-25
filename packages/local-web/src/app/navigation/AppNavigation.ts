@@ -1,5 +1,6 @@
 import { router } from '@web/app/router';
 import type { FileRouteTypes } from '@web/routeTree.gen';
+import { getCurrentHostId } from '@/shared/providers/HostIdProvider';
 import {
   type AppDestination,
   type AppNavigation,
@@ -314,8 +315,9 @@ export function createLocalAppNavigation(): AppNavigation {
   ) => {
     const currentHostId =
       typeof window === 'undefined'
-        ? null
-        : parseLocalHostIdFromPathname(window.location.pathname);
+        ? getCurrentHostId()
+        : (parseLocalHostIdFromPathname(window.location.pathname) ??
+          getCurrentHostId());
 
     void router.navigate({
       ...destinationToLocalTarget(destination, { currentHostId }),
@@ -345,9 +347,21 @@ export function createLocalAppNavigation(): AppNavigation {
       navigateTo({ kind: 'project', projectId }, transition),
     goToProjectIssue: (projectId, issueId, transition) =>
       navigateTo({ kind: 'project-issue', projectId, issueId }, transition),
-    goToProjectIssueWorkspace: (projectId, issueId, workspaceId, transition) =>
+    goToProjectIssueWorkspace: (
+      projectId,
+      issueId,
+      workspaceId,
+      transition,
+      hostId
+    ) =>
       navigateTo(
-        { kind: 'project-issue-workspace', projectId, issueId, workspaceId },
+        {
+          kind: 'project-issue-workspace',
+          projectId,
+          issueId,
+          workspaceId,
+          ...(hostId ? { hostId } : {}),
+        },
         transition
       ),
     goToProjectIssueWorkspaceCreate: (

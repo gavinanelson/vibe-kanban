@@ -1225,6 +1225,64 @@ pub trait ContainerService {
             }
         }
 
+        // Start processing normalised logs for executor requests and follow ups
+        let workspace_root = self.workspace_to_current_dir(workspace);
+        #[cfg_attr(feature = "qa-mode", allow(unused_variables))]
+        if let Some((executor_profile_id, working_dir)) = match executor_action.typ() {
+            ExecutorActionType::CodingAgentInitialRequest(request) => Some((
+                request.executor_config.profile_id(),
+                request.effective_dir(&workspace_root),
+            )),
+            ExecutorActionType::CodingAgentFollowUpRequest(request) => Some((
+                request.executor_config.profile_id(),
+                request.effective_dir(&workspace_root),
+            )),
+            ExecutorActionType::ReviewRequest(request) => Some((
+                request.executor_config.profile_id(),
+                request.effective_dir(&workspace_root),
+            )),
+            _ => None,
+        } {
+            let msg_store = match self.get_msg_store_by_id(&execution_process.id).await {
+                Some(store) => store,
+                None => {
+                    self.msg_stores()
+                        .write()
+                        .await
+                        .remove(&execution_process.id);
+                    return Err(ContainerError::Other(anyhow!(
+                        "MsgStore missing for execution {} during normalization setup",
+                        execution_process.id
+                    )));
+                }
+            };
+            #[cfg(feature = "qa-mode")]
+            {
+                let executor = QaMockExecutor;
+                let _ = executor.normalize_logs(msg_store, &working_dir);
+            }
+            #[cfg(not(feature = "qa-mode"))]
+            {
+                if let Some(executor) =
+                    ExecutorConfigs::get_cached().get_coding_agent(&executor_profile_id)
+                {
+                    let _ = executor.normalize_logs(msg_store, &working_dir);
+                } else {
+                    tracing::error!(
+                        "Failed to resolve profile '{:?}' for normalization",
+                        executor_profile_id
+                    );
+                }
+            }
+        }
+
+        execution_process::spawn_stream_raw_logs_to_storage(
+            self.msg_stores().clone(),
+            self.db().clone(),
+            execution_process.id,
+            session.id,
+        );
+
         if let Err(start_error) = self
             .start_execution_inner(workspace, &execution_process, executor_action)
             .await
@@ -1295,63 +1353,6 @@ pub trait ContainerService {
             return Err(start_error);
         }
 
-        // Start processing normalised logs for executor requests and follow ups
-        let workspace_root = self.workspace_to_current_dir(workspace);
-        #[cfg_attr(feature = "qa-mode", allow(unused_variables))]
-        if let Some((executor_profile_id, working_dir)) = match executor_action.typ() {
-            ExecutorActionType::CodingAgentInitialRequest(request) => Some((
-                request.executor_config.profile_id(),
-                request.effective_dir(&workspace_root),
-            )),
-            ExecutorActionType::CodingAgentFollowUpRequest(request) => Some((
-                request.executor_config.profile_id(),
-                request.effective_dir(&workspace_root),
-            )),
-            ExecutorActionType::ReviewRequest(request) => Some((
-                request.executor_config.profile_id(),
-                request.effective_dir(&workspace_root),
-            )),
-            _ => None,
-        } {
-            let msg_store = match self.get_msg_store_by_id(&execution_process.id).await {
-                Some(store) => store,
-                None => {
-                    self.msg_stores()
-                        .write()
-                        .await
-                        .remove(&execution_process.id);
-                    return Err(ContainerError::Other(anyhow!(
-                        "MsgStore missing for execution {} during normalization setup",
-                        execution_process.id
-                    )));
-                }
-            };
-            #[cfg(feature = "qa-mode")]
-            {
-                let executor = QaMockExecutor;
-                let _ = executor.normalize_logs(msg_store, &working_dir);
-            }
-            #[cfg(not(feature = "qa-mode"))]
-            {
-                if let Some(executor) =
-                    ExecutorConfigs::get_cached().get_coding_agent(&executor_profile_id)
-                {
-                    let _ = executor.normalize_logs(msg_store, &working_dir);
-                } else {
-                    tracing::error!(
-                        "Failed to resolve profile '{:?}' for normalization",
-                        executor_profile_id
-                    );
-                }
-            }
-        }
-
-        execution_process::spawn_stream_raw_logs_to_storage(
-            self.msg_stores().clone(),
-            self.db().clone(),
-            execution_process.id,
-            session.id,
-        );
         Ok(execution_process)
     }
 

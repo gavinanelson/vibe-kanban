@@ -110,7 +110,7 @@ function ProjectKanbanLayout({ projectName }: { projectName: string }) {
   usePageTitle(issue?.title, projectName);
   const [kanbanLeftPanelSize, setKanbanLeftPanelSize] = usePaneSize(
     PERSIST_KEYS.kanbanLeftPanel,
-    75
+    80
   );
 
   const isRightPanelOpen = isPanelOpen;
@@ -133,7 +133,7 @@ function ProjectKanbanLayout({ projectName }: { projectName: string }) {
           'kanban-left': kanbanLeftPanelSize,
           'kanban-right': 100 - kanbanLeftPanelSize,
         }
-      : { 'kanban-left': 75, 'kanban-right': 25 };
+      : { 'kanban-left': 80, 'kanban-right': 20 };
 
   const onKanbanLayoutChange = (layout: Layout) => {
     if (isRightPanelOpen) {
@@ -166,7 +166,7 @@ function ProjectKanbanLayout({ projectName }: { projectName: string }) {
       {isRightPanelOpen && (
         <Panel
           id="kanban-right"
-          minSize="400px"
+          minSize="340px"
           maxSize="800px"
           className="min-w-0 h-full overflow-hidden bg-secondary"
         >

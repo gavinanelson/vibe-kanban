@@ -157,6 +157,32 @@ async fn start_auto_review(
         )));
     }
 
+    let rows = list_processes(&deployment.db().pool, workspace.id).await?;
+    let implementation_process = rows.iter().find(|row| is_implementation_process(row));
+    let review_processes: Vec<&ProcessRow> = rows
+        .iter()
+        .filter(|row| is_auto_review_session(row.session_name.as_deref()))
+        .collect();
+    let review_fix_process = rows
+        .iter()
+        .find(|row| is_review_fix_session(row.session_name.as_deref()));
+    let (latest_review_decision, _, _) =
+        decide_from_review_attempts(&deployment, &review_processes).await;
+    let pr_merge_state = infer_pr_merge_state(&workspace, &latest_review_decision);
+
+    if let Err(message) = auto_review_start_gate(
+        &workspace,
+        implementation_process,
+        &latest_review_decision,
+        review_fix_process,
+        &pr_merge_state,
+        payload.rerun,
+    ) {
+        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
+            message,
+        )));
+    }
+
     let session = Session::create(
         &deployment.db().pool,
         &CreateSession {
@@ -468,11 +494,8 @@ async fn decide_from_review_attempts<'a>(
     if reviews.is_empty() {
         return (AutopilotDecision::Missing, None, None);
     }
-    if reviews
-        .iter()
-        .any(|row| row.status == ExecutionProcessStatus::Running)
-    {
-        return (AutopilotDecision::Running, None, None);
+    if let Some(row) = running_review_attempt(reviews) {
+        return (AutopilotDecision::Running, None, Some(row));
     }
 
     for row in reviews {
@@ -494,6 +517,13 @@ async fn decide_from_review_attempts<'a>(
         return (AutopilotDecision::Missing, None, Some(latest));
     }
     (AutopilotDecision::Failed, None, Some(latest))
+}
+
+fn running_review_attempt<'a>(reviews: &[&'a ProcessRow]) -> Option<&'a ProcessRow> {
+    reviews
+        .iter()
+        .copied()
+        .find(|row| row.status == ExecutionProcessStatus::Running)
 }
 
 async fn process_agent_text(deployment: &DeploymentImpl, process_id: Uuid) -> String {
@@ -749,6 +779,64 @@ fn review_fix_start_gate(
     Ok(())
 }
 
+fn auto_review_start_gate(
+    workspace: &Workspace,
+    implementation: Option<&ProcessRow>,
+    decision: &AutopilotDecision,
+    review_fix: Option<&ProcessRow>,
+    pr_merge_state: &str,
+    rerun: bool,
+) -> Result<(), String> {
+    let (action, blocker) = next_action(
+        workspace,
+        implementation,
+        decision,
+        review_fix,
+        pr_merge_state,
+    );
+
+    if action != AutopilotNextAction::StartAutoReview {
+        return Err(format!(
+            "Auto-review cannot start while the next action is {}.",
+            next_action_name(&action)
+        ));
+    }
+
+    if decision == &AutopilotDecision::RequestChanges {
+        let review_fix_completed = review_fix.is_some_and(|row| {
+            row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0)
+        });
+        if review_fix_completed && !rerun {
+            return Err(
+                "Auto-review rerun must be explicit after review fix completes.".to_string(),
+            );
+        }
+    }
+
+    if let Some(blocker) = blocker {
+        if !rerun {
+            return Err(blocker);
+        }
+    }
+
+    Ok(())
+}
+
+fn next_action_name(action: &AutopilotNextAction) -> &'static str {
+    match action {
+        AutopilotNextAction::NoWorkspace => "no_workspace",
+        AutopilotNextAction::WaitForImplementation => "wait_for_implementation",
+        AutopilotNextAction::StartAutoReview => "start_auto_review",
+        AutopilotNextAction::WaitForAutoReview => "wait_for_auto_review",
+        AutopilotNextAction::StartReviewFix => "start_review_fix",
+        AutopilotNextAction::WaitForReviewFix => "wait_for_review_fix",
+        AutopilotNextAction::ReadyForMerge => "ready_for_merge",
+        AutopilotNextAction::MergeWait => "merge_wait",
+        AutopilotNextAction::Done => "done",
+        AutopilotNextAction::InvestigateFailure => "investigate_failure",
+    }
+}
+
 fn next_action(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
@@ -834,17 +922,37 @@ mod tests {
         }
     }
 
-    fn completed_process(name: &str, exit_code: i64) -> ProcessRow {
+    fn process(name: &str, status: ExecutionProcessStatus, exit_code: Option<i64>) -> ProcessRow {
         ProcessRow {
             id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
             session_name: Some(name.to_string()),
-            status: ExecutionProcessStatus::Completed,
+            status,
             run_reason: ExecutionProcessRunReason::CodingAgent,
-            exit_code: Some(exit_code),
+            exit_code,
             started_at: Utc::now().to_rfc3339(),
             completed_at: Some(Utc::now().to_rfc3339()),
         }
+    }
+
+    fn completed_process(name: &str, exit_code: i64) -> ProcessRow {
+        process(name, ExecutionProcessStatus::Completed, Some(exit_code))
+    }
+
+    #[test]
+    fn running_review_attempt_returns_active_review_process() {
+        let completed = completed_process("Auto review - Codex (medium)", 0);
+        let running = process(
+            "Auto review rerun - Codex (medium)",
+            ExecutionProcessStatus::Running,
+            None,
+        );
+        let reviews = vec![&completed, &running];
+
+        assert_eq!(
+            running_review_attempt(&reviews).map(|row| row.id),
+            Some(running.id)
+        );
     }
 
     #[test]
@@ -925,6 +1033,73 @@ mod tests {
                 None
             ),
             Err("Review fix can only start after auto-review requests changes.".to_string())
+        );
+    }
+
+    #[test]
+    fn action_gating_allows_initial_auto_review_when_next_action_starts_review() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::Missing,
+                None,
+                "waiting_for_review",
+                false,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn action_gating_requires_explicit_rerun_after_review_fix_completes() {
+        let implementation = completed_process("Implementation", 0);
+        let review_fix = completed_process("Auto review fix", 0);
+        let workspace = workspace();
+
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&review_fix),
+                "blocked_by_review",
+                false,
+            ),
+            Err("Auto-review rerun must be explicit after review fix completes.".to_string())
+        );
+
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&review_fix),
+                "blocked_by_review",
+                true,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn action_gating_blocks_auto_review_when_review_fix_is_next() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                None,
+                "blocked_by_review",
+                false,
+            ),
+            Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
         );
     }
 
