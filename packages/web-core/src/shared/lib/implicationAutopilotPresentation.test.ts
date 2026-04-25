@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { deepEqual, equal, match } from 'node:assert/strict';
+import { describe, it } from 'node:test';
 
 import {
   buildImplicationAutopilotPanelStatus,
   formatImplicationAutopilotValue,
   getImplicationAutopilotNextActionDisplay,
-} from './implicationAutopilotPresentation';
+} from './implicationAutopilotPresentation.ts';
 import type { ImplicationAutopilotStatus } from './api';
 
 const baseStatus: ImplicationAutopilotStatus = {
@@ -40,58 +41,50 @@ const baseStatus: ImplicationAutopilotStatus = {
 
 describe('implication autopilot presentation', () => {
   it('formats next action tokens as operator-facing copy', () => {
-    expect(
-      getImplicationAutopilotNextActionDisplay('start_auto_review')
-    ).toEqual({
+    deepEqual(getImplicationAutopilotNextActionDisplay('start_auto_review'), {
       label: 'Start auto-review',
       description:
         'Implementation is complete. Start one guarded Codex review for the current workspace state.',
     });
 
-    expect(
-      getImplicationAutopilotNextActionDisplay('wait_for_review_fix')
-    ).toEqual({
+    deepEqual(getImplicationAutopilotNextActionDisplay('wait_for_review_fix'), {
       label: 'Fix running',
       description:
         'Requested changes are being handled by a Codex fix session.',
     });
 
-    expect(getImplicationAutopilotNextActionDisplay('ready_for_merge')).toEqual(
-      {
-        label: 'Ready for merge',
-        description:
-          'Auto-review passed; open the PR, verify checks and mergeability, then complete the handoff.',
-      }
-    );
+    deepEqual(getImplicationAutopilotNextActionDisplay('ready_for_merge'), {
+      label: 'Ready for merge',
+      description:
+        'Auto-review passed; open the PR, verify checks and mergeability, then complete the handoff.',
+    });
   });
 
   it('keeps unknown status values readable without losing the raw signal', () => {
-    expect(formatImplicationAutopilotValue('blocked_by_review')).toBe(
+    equal(
+      formatImplicationAutopilotValue('blocked_by_review'),
       'Blocked by review'
     );
   });
 
-  it.each([
+  for (const [nextAction, label, state] of [
     ['start_auto_review', 'Auto-review', 'available'],
     ['wait_for_auto_review', 'Auto-review', 'running'],
     ['start_review_fix', 'Review fix', 'available'],
     ['wait_for_review_fix', 'Review fix', 'running'],
     ['ready_for_merge', 'PR/checks/merge', 'available'],
     ['investigate_failure', 'Done/blocker', 'blocked'],
-  ] as const)(
-    'marks the current timeline step for %s',
-    (nextAction, label, state) => {
+  ] as const) {
+    it(`marks the current timeline step for ${nextAction}`, () => {
       const panel = buildImplicationAutopilotPanelStatus({
         ...baseStatus,
         next_action: nextAction,
       });
 
-      expect(panel.currentStepLabel).toBe(label);
-      expect(panel.steps.find((step) => step.label === label)?.state).toBe(
-        state
-      );
-    }
-  );
+      equal(panel.currentStepLabel, label);
+      equal(panel.steps.find((step) => step.label === label)?.state, state);
+    });
+  }
 
   it('shows request-changes review fix and explicit re-review copy', () => {
     const panel = buildImplicationAutopilotPanelStatus({
@@ -104,18 +97,22 @@ describe('implication autopilot presentation', () => {
       next_action: 'start_review_fix',
     });
 
-    expect(panel.steps.map((step) => [step.label, step.state])).toEqual([
-      ['Implementation', 'completed'],
-      ['Auto-review', 'blocked'],
-      ['Review fix', 'available'],
-      ['Re-review', 'not_started'],
-      ['PR/checks/merge', 'not_started'],
-      ['Done/blocker', 'not_started'],
-    ]);
-    expect(panel.latestReviewExcerpt).toContain('Decision: request changes');
-    expect(
-      panel.steps.find((step) => step.label === 'Re-review')?.summary
-    ).toContain('after the fix session completes');
+    deepEqual(
+      panel.steps.map((step) => [step.label, step.state]),
+      [
+        ['Implementation', 'completed'],
+        ['Auto-review', 'blocked'],
+        ['Review fix', 'available'],
+        ['Re-review', 'not_started'],
+        ['PR/checks/merge', 'blocked'],
+        ['Done/blocker', 'not_started'],
+      ]
+    );
+    match(panel.latestReviewExcerpt ?? '', /Decision: request changes/);
+    match(
+      panel.steps.find((step) => step.label === 'Re-review')?.summary ?? '',
+      /after the fix session completes/
+    );
   });
 
   it('turns a completed review fix into guarded re-review copy', () => {
@@ -139,23 +136,72 @@ describe('implication autopilot presentation', () => {
       },
     });
 
-    expect(panel.currentStepLabel).toBe('Re-review');
-    expect(panel.steps.find((step) => step.label === 'Re-review')?.state).toBe(
+    equal(panel.currentStepLabel, 'Re-review');
+    equal(
+      panel.steps.find((step) => step.label === 'Re-review')?.state,
       'available'
     );
-    expect(panel.nextActionDescription).toContain('explicit rerun');
-    expect(panel.tokenSafetyNote).toContain('guarded');
+    match(panel.nextActionDescription, /explicit rerun/);
+    match(panel.tokenSafetyNote, /guarded/);
+  });
+
+  it('shows merge readiness as a handoff, not an automated merge claim', () => {
+    const panel = buildImplicationAutopilotPanelStatus({
+      ...baseStatus,
+      auto_review_state: 'pass',
+      latest_review_decision: 'pass',
+      pr_merge_state: 'review_passed_merge_status_unknown',
+      next_action: 'ready_for_merge',
+      blocker:
+        'Review passed; PR/check mergeability is not daemonized in this UI slice yet.',
+    });
+
+    equal(panel.currentStepLabel, 'PR/checks/merge');
+    equal(
+      panel.steps.find((step) => step.label === 'PR/checks/merge')?.state,
+      'available'
+    );
+    match(panel.nextActionDescription, /verify checks and mergeability/);
+    match(panel.blocker ?? '', /not daemonized/);
+  });
+
+  it('surfaces dirty or conflicting PR blockers in the final blocker step', () => {
+    const panel = buildImplicationAutopilotPanelStatus({
+      ...baseStatus,
+      latest_review_decision: 'pass',
+      pr_merge_state: 'blocked_by_pr_conflict',
+      next_action: 'investigate_failure',
+      blocker:
+        'PR is dirty or conflicting; it is not safe to re-review or merge.',
+      token_safety_state: 'blocked',
+      token_safety_note:
+        'PR is dirty or conflicting; it is not safe to re-review or merge.',
+    });
+
+    equal(panel.currentStepLabel, 'Done/blocker');
+    equal(
+      panel.steps.find((step) => step.label === 'Done/blocker')?.state,
+      'blocked'
+    );
+    match(panel.blocker ?? '', /dirty or conflicting/);
+    match(panel.tokenSafetyNote, /not safe to re-review or merge/);
   });
 
   it('returns no-workspace blocker copy without implying active token use', () => {
     const panel = buildImplicationAutopilotPanelStatus(null);
 
-    expect(panel.currentStepLabel).toBe('Implementation');
-    expect(panel.blocker).toContain('No local workspace');
-    expect(panel.steps[0]).toMatchObject({
-      label: 'Implementation',
-      state: 'blocked',
-    });
-    expect(panel.tokenSafetyNote).toContain('No Codex session is running');
+    equal(panel.currentStepLabel, 'Implementation');
+    match(panel.blocker ?? '', /No local workspace/);
+    deepEqual(
+      {
+        label: panel.steps[0].label,
+        state: panel.steps[0].state,
+      },
+      {
+        label: 'Implementation',
+        state: 'blocked',
+      }
+    );
+    match(panel.tokenSafetyNote, /No Codex session is running/);
   });
 });
