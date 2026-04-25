@@ -16,6 +16,7 @@ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useIsMobile } from '@/shared/hooks/useIsMobile';
 import { cn } from '@/shared/lib/utils';
 import { useCurrentKanbanRouteState } from '@/shared/hooks/useCurrentKanbanRouteState';
+import { useHostId } from '@/shared/providers/HostIdProvider';
 import {
   useUiPreferencesStore,
   resolveKanbanProjectState,
@@ -185,6 +186,7 @@ export function KanbanContainer() {
   } = useOrgContext();
   const { activeWorkspaces } = useWorkspaceContext();
   const { userId } = useAuth();
+  const effectiveHostId = useHostId();
   const autoReviewTransitionsRef = useRef<Set<string>>(new Set());
   const previousIssueStatusByIdRef = useRef<Map<string, string> | null>(null);
   const [pendingAutoReviewsByIssueId, setPendingAutoReviewsByIssueId] =
@@ -687,13 +689,7 @@ export function KanbanContainer() {
 
   const startAutoReviewForIssue = useCallback(
     async (issueId: string) => {
-      const hostId = routeState.hostId;
-      if (!hostId) {
-        console.warn('Skipping auto-review: no remote host is selected', {
-          issueId,
-        });
-        return;
-      }
+      const hostId = effectiveHostId;
       const workspacesForIssue = getWorkspacesForIssue(issueId).filter(
         (workspace) => !workspace.archived && workspace.local_workspace_id
       );
@@ -789,7 +785,7 @@ export function KanbanContainer() {
         });
       }
     },
-    [getTagObjectsForIssue, getWorkspacesForIssue, routeState.hostId]
+    [effectiveHostId, getTagObjectsForIssue, getWorkspacesForIssue]
   );
 
   useEffect(() => {
