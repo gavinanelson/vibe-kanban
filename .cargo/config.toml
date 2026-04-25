@@ -1,3 +1,8 @@
+[build]
+# Serialize Cargo by default so native/release builds don't exhaust 16GB
+# laptops. Override intentionally per invocation with `CARGO_BUILD_JOBS=N`.
+jobs = 1
+
 [target.x86_64-apple-darwin]
 rustflags = [
     "-C", "link-arg=-framework",
