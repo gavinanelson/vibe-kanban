@@ -48,20 +48,21 @@ if [[ "${VK_CARGO_MEMORY_SAFE:-1}" != "0" ]] && is_release_or_native_build "$@";
   cargo_incremental_source="$(setting_source CARGO_INCREMENTAL)"
   release_debug_source="$(setting_source CARGO_PROFILE_RELEASE_DEBUG)"
   release_split_debuginfo_source="$(setting_source CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO)"
-  rustflags_source="$(setting_source RUSTFLAGS)"
-
   export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
   export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
   export CARGO_PROFILE_RELEASE_DEBUG="${CARGO_PROFILE_RELEASE_DEBUG:-0}"
   export CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO="${CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO:-off}"
-  export RUSTFLAGS="${RUSTFLAGS:--C debuginfo=0}"
 
   echo "resource-safe cargo: enabled for release/native build" >&2
   echo "  CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} (${cargo_build_jobs_source})" >&2
   echo "  CARGO_INCREMENTAL=${CARGO_INCREMENTAL} (${cargo_incremental_source})" >&2
   echo "  CARGO_PROFILE_RELEASE_DEBUG=${CARGO_PROFILE_RELEASE_DEBUG} (${release_debug_source})" >&2
   echo "  CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=${CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO} (${release_split_debuginfo_source})" >&2
-  echo "  RUSTFLAGS=${RUSTFLAGS} (${rustflags_source})" >&2
+  if [[ -n "${RUSTFLAGS:-}" ]]; then
+    echo "  RUSTFLAGS=${RUSTFLAGS} (user; preserved)" >&2
+  else
+    echo "  RUSTFLAGS=<unset> (preserving Cargo target-specific rustflags)" >&2
+  fi
   echo "  override: set env vars explicitly, or VK_CARGO_MEMORY_SAFE=0 to disable" >&2
 else
   echo "resource-safe cargo: no release/native guard applied" >&2

@@ -51,7 +51,7 @@ resource-safe cargo: enabled for release/native build
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_RELEASE_DEBUG=0
   CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off
-  RUSTFLAGS=-C debuginfo=0
+  RUSTFLAGS=<unset> (preserving Cargo target-specific rustflags)
 ```
 
 ## Override the defaults intentionally

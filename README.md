@@ -168,7 +168,9 @@ pnpm run tauri:build
 ```
 
 The wrapper prints the effective `CARGO_BUILD_JOBS`, release debug, split debug
-information, incremental, and `RUSTFLAGS` settings before it starts Cargo. See
+information, and incremental settings before it starts Cargo. It preserves
+Cargo's target-specific rustflags unless you intentionally export `RUSTFLAGS`.
+See
 [Resource-safe Builds](https://vibekanban.com/docs/self-hosting/resource-safe-builds)
 for the full guardrail and override contract.
 
