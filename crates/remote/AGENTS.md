@@ -176,3 +176,7 @@ When adding a new type to `api-types` that the remote frontend needs, add its `:
 - **Billing feature gate**: All billing code must be behind `#[cfg(feature = "vk-billing")]`. The `billing` crate is stripped from Cargo.toml during self-hosted Docker builds.
 - **Frontend URL vars are build-time**: `VITE_*` variables are baked into the JS bundle. Changing them requires a rebuild.
 - **SPA fallback path**: The frontend is served from `/srv/static` (hardcoded). This path only exists inside the Docker container.
+
+## Local Heavy Validation Guardrail
+
+Prefer targeted checks for the exact remote crate/module you changed. Do not run broad local workspace validation (`cargo test --workspace`, broad `cargo test`, `cargo clippy --workspace`, guarded root `pnpm run check`, or release/Tauri builds) on Host A or omarchy unless Gavin explicitly approves and `ALLOW_HEAVY_VIBE_VALIDATION=1` is set. Use CI/off-host validation for full sweeps.

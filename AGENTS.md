@@ -1,4 +1,10 @@
 # Repository Guidelines
+## Local Heavy Validation Guardrail
+
+Do **not** run broad local Vibe Kanban Rust/TypeScript validation on Host A or omarchy by default. This includes `pnpm run check`, `pnpm run backend:check`, `pnpm run lint`, `pnpm run generate-types:check`, `cargo check --workspace`, `cargo test --workspace`, broad `cargo test`, `cargo clippy --workspace`, `cargo build --release`, and Tauri release/native builds.
+
+Default to focused checks for the exact package/file you changed. Use CI/off-host validation for full sweeps. Only run the guarded broad commands locally when Gavin explicitly approves and the command is launched with `ALLOW_HEAVY_VIBE_VALIDATION=1`.
+
 
 ## Project Structure & Module Organization
 - `crates/`: Rust workspace crates — `server` (API + bins), `db` (SQLx models/migrations), `executors`, `services`, `utils`, `git` (Git operations), `api-types` (shared API types for local + remote), `review` (PR review tool), `deployment`, `local-deployment`, `remote`.

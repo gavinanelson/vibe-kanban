@@ -72,10 +72,7 @@ import {
   useKanbanIssueComposerStore,
 } from '@/shared/stores/useKanbanIssueComposerStore';
 import { getProjectDefaultGitHubRepo } from '@/shared/lib/projectGitHubDefaults';
-import {
-  formatImplicationAutopilotValue,
-  getImplicationAutopilotNextActionDisplay,
-} from '@/shared/lib/implicationAutopilotPresentation';
+import { buildImplicationAutopilotPanelStatus } from '@/shared/lib/implicationAutopilotPresentation';
 import { useHostId } from '@/shared/providers/HostIdProvider';
 
 interface KanbanIssuePanelContainerProps {
@@ -371,49 +368,12 @@ export function KanbanIssuePanelContainer({
   const implicationAutopilotPanelStatus = useMemo(() => {
     if (!shouldShowImplicationAutopilot) return null;
     if (!selectedIssueLocalWorkspaceId) {
-      const nextActionDisplay =
-        getImplicationAutopilotNextActionDisplay('no_workspace');
-      return {
-        implementationState: 'Missing',
-        autoReviewState: 'Missing',
-        latestReviewDecision: 'Missing',
-        reviewFixState: 'Not started',
-        prMergeState: 'No workspace',
-        nextAction: 'no_workspace',
-        nextActionLabel: nextActionDisplay.label,
-        nextActionDescription: nextActionDisplay.description,
-        blocker: 'No local workspace is linked to this Implication issue yet.',
-        defaultModel: 'gpt-5.5',
-        defaultReasoning: 'medium',
-        daemonized: false,
-      };
+      return buildImplicationAutopilotPanelStatus(null);
     }
 
     const data = autopilotStatusQuery.data;
     if (!data) return null;
-    const nextActionDisplay = getImplicationAutopilotNextActionDisplay(
-      data.next_action
-    );
-
-    return {
-      implementationState: formatImplicationAutopilotValue(
-        data.implementation_state
-      ),
-      autoReviewState: formatImplicationAutopilotValue(data.auto_review_state),
-      latestReviewDecision: formatImplicationAutopilotValue(
-        data.latest_review_decision
-      ),
-      latestReviewExcerpt: data.latest_review_excerpt,
-      reviewFixState: formatImplicationAutopilotValue(data.review_fix_state),
-      prMergeState: formatImplicationAutopilotValue(data.pr_merge_state),
-      nextAction: data.next_action,
-      nextActionLabel: nextActionDisplay.label,
-      nextActionDescription: nextActionDisplay.description,
-      blocker: data.blocker,
-      defaultModel: data.default_model,
-      defaultReasoning: data.default_reasoning,
-      daemonized: data.daemonized,
-    };
+    return buildImplicationAutopilotPanelStatus(data);
   }, [
     shouldShowImplicationAutopilot,
     selectedIssueLocalWorkspaceId,

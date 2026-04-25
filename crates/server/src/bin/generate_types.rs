@@ -93,6 +93,7 @@ fn generate_types_content() -> String {
         server::routes::repo::InitRepoRequest::decl(),
         server::routes::implication_autopilot::AutopilotDecision::decl(),
         server::routes::implication_autopilot::AutopilotNextAction::decl(),
+        server::routes::implication_autopilot::AutopilotTokenSafetyState::decl(),
         server::routes::implication_autopilot::AutopilotProcessSummary::decl(),
         server::routes::implication_autopilot::ImplicationAutopilotStatus::decl(),
         server::routes::implication_autopilot::StartAutopilotReviewRequest::decl(),
