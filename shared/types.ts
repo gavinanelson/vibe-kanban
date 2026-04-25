@@ -270,7 +270,9 @@ export type AutopilotProcessSummary = { id: string, session_id: string, session_
 
 export type ImplicationAutopilotStatus = { workspace_id: string, workspace_name: string | null, implementation_state: string, auto_review_state: AutopilotDecision, latest_review_decision: AutopilotDecision, latest_review_excerpt: string | null, review_fix_state: string, pr_merge_state: string, next_action: AutopilotNextAction, blocker: string | null, implementation_process: AutopilotProcessSummary | null, auto_review_process: AutopilotProcessSummary | null, review_fix_process: AutopilotProcessSummary | null, default_model: string, default_reasoning: string, daemonized: boolean, };
 
-export type StartAutopilotReviewRequest = { rerun: boolean, };
+export type StartAutopilotReviewRequest = { rerun: boolean, github_repo_full_name: string | null, };
+
+export type StartAutopilotReviewFixRequest = { github_repo_full_name: string | null, };
 
 export type TagSearchParams = { search: string | null, };
 
