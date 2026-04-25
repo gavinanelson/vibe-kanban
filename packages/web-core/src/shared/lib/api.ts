@@ -203,6 +203,11 @@ export type ImplicationAutopilotNextAction =
   | 'done'
   | 'investigate_failure';
 
+export type ImplicationAutopilotTokenSafetyState =
+  | 'idle'
+  | 'guarded'
+  | 'blocked';
+
 export interface ImplicationAutopilotProcessSummary {
   id: string;
   session_id: string;
@@ -240,6 +245,8 @@ export interface ImplicationAutopilotStatus {
   default_model: string;
   default_reasoning: string;
   daemonized: boolean;
+  token_safety_state: ImplicationAutopilotTokenSafetyState;
+  token_safety_note: string;
 }
 
 export type OrganizationBillingStatus =

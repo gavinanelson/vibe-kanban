@@ -266,9 +266,11 @@ export type AutopilotDecision = "missing" | "running" | "pass" | "request_change
 
 export type AutopilotNextAction = "no_workspace" | "wait_for_implementation" | "start_auto_review" | "wait_for_auto_review" | "start_review_fix" | "wait_for_review_fix" | "ready_for_merge" | "merge_wait" | "done" | "investigate_failure";
 
+export type AutopilotTokenSafetyState = "idle" | "guarded" | "blocked";
+
 export type AutopilotProcessSummary = { id: string, session_id: string, session_name: string | null, status: ExecutionProcessStatus, run_reason: ExecutionProcessRunReason, exit_code: bigint | null, started_at: string, completed_at: string | null, };
 
-export type ImplicationAutopilotStatus = { workspace_id: string, workspace_name: string | null, implementation_state: string, auto_review_state: AutopilotDecision, latest_review_decision: AutopilotDecision, latest_review_excerpt: string | null, review_fix_state: string, pr_merge_state: string, next_action: AutopilotNextAction, blocker: string | null, implementation_process: AutopilotProcessSummary | null, auto_review_process: AutopilotProcessSummary | null, review_fix_process: AutopilotProcessSummary | null, default_model: string, default_reasoning: string, daemonized: boolean, };
+export type ImplicationAutopilotStatus = { workspace_id: string, workspace_name: string | null, implementation_state: string, auto_review_state: AutopilotDecision, latest_review_decision: AutopilotDecision, latest_review_excerpt: string | null, review_fix_state: string, pr_merge_state: string, next_action: AutopilotNextAction, blocker: string | null, implementation_process: AutopilotProcessSummary | null, auto_review_process: AutopilotProcessSummary | null, review_fix_process: AutopilotProcessSummary | null, default_model: string, default_reasoning: string, daemonized: boolean, token_safety_state: AutopilotTokenSafetyState, token_safety_note: string, };
 
 export type StartAutopilotReviewRequest = { rerun: boolean, github_repo_full_name: string | null, };
 

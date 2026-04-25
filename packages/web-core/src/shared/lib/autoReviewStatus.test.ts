@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import { deepEqual, equal } from 'node:assert/strict';
 
-import { deriveAutoReviewStatus } from './autoReviewStatus';
+import { deriveAutoReviewStatus } from './autoReviewStatus.ts';
 
 describe('deriveAutoReviewStatus', () => {
   it('returns starting while the app is creating the review session', () => {

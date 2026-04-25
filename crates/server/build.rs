@@ -31,17 +31,24 @@ fn main() {
         );
     }
 
-    // Create packages/local-web/dist directory if it doesn't exist
-    let dist_path = Path::new("../../packages/local-web/dist");
+    // Re-run whenever the embedded web assets are rebuilt. Without this, a release
+    // binary can permanently embed the dummy "Build web app first" page if Cargo
+    // compiled once before `pnpm --filter @vibe/local-web run build` populated dist/.
+    let dist_path = workspace_root.join("packages/local-web/dist");
+    let dist_index = dist_path.join("index.html");
+    println!("cargo:rerun-if-changed={}", dist_index.display());
+
+    // Create packages/local-web/dist directory if it doesn't exist, so Rust-only
+    // checks can compile before the frontend has been built.
     if !dist_path.exists() {
         println!("cargo:warning=Creating dummy packages/local-web/dist directory for compilation");
-        fs::create_dir_all(dist_path).unwrap();
+        fs::create_dir_all(&dist_path).unwrap();
 
         // Create a dummy index.html
         let dummy_html = r#"<!DOCTYPE html>
 <html><head><title>Build web app first</title></head>
 <body><h1>Please build @vibe/local-web first</h1></body></html>"#;
 
-        fs::write(dist_path.join("index.html"), dummy_html).unwrap();
+        fs::write(dist_index, dummy_html).unwrap();
     }
 }

@@ -21,6 +21,10 @@ import {
   GithubLogoIcon,
   RobotIcon,
   PlayIcon,
+  CheckCircleIcon,
+  CircleIcon,
+  ClockIcon,
+  WarningCircleIcon,
 } from '@phosphor-icons/react';
 import {
   IssueTagsRow,
@@ -77,7 +81,18 @@ export interface ImplicationAutopilotPanelStatus {
   nextAction: string;
   nextActionLabel: string;
   nextActionDescription: string;
+  currentStepLabel: string;
   blocker?: string | null;
+  steps: {
+    label: string;
+    state: 'completed' | 'running' | 'blocked' | 'available' | 'not_started';
+    summary: string;
+    sessionName?: string | null;
+    processId?: string | null;
+    processStatus?: string | null;
+  }[];
+  tokenSafetyState: 'idle' | 'guarded' | 'blocked';
+  tokenSafetyNote: string;
   defaultModel: string;
   defaultReasoning: string;
   daemonized: boolean;
@@ -199,14 +214,96 @@ export interface KanbanIssuePanelProps {
   renderCommentsSection?: (issueId: string) => ReactNode;
 }
 
-function AutopilotFact({ label, value }: { label: string; value: string }) {
+const AUTOPILOT_STEP_STYLE = {
+  completed: {
+    icon: CheckCircleIcon,
+    className: 'border-success/40 bg-success/5 text-success',
+    label: 'Completed',
+  },
+  running: {
+    icon: ClockIcon,
+    className: 'border-brand/50 bg-brand/10 text-brand',
+    label: 'Running',
+  },
+  blocked: {
+    icon: WarningCircleIcon,
+    className: 'border-warning/50 bg-warning/10 text-warning',
+    label: 'Blocked',
+  },
+  available: {
+    icon: PlayIcon,
+    className: 'border-brand/50 bg-brand/10 text-brand',
+    label: 'Current',
+  },
+  not_started: {
+    icon: CircleIcon,
+    className: 'border-border bg-panel text-low',
+    label: 'Not started',
+  },
+} as const;
+
+function AutopilotStatePill({
+  state,
+}: {
+  state: keyof typeof AUTOPILOT_STEP_STYLE;
+}) {
+  const style = AUTOPILOT_STEP_STYLE[state];
+
   return (
-    <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-normal text-low">
-        {label}
+    <span
+      className={cn(
+        'inline-flex items-center rounded-sm border px-half py-0.5 text-[10px] font-medium uppercase tracking-normal',
+        style.className
+      )}
+    >
+      {style.label}
+    </span>
+  );
+}
+
+function AutopilotStepRow({
+  step,
+  isCurrent,
+}: {
+  step: ImplicationAutopilotPanelStatus['steps'][number];
+  isCurrent: boolean;
+}) {
+  const style = AUTOPILOT_STEP_STYLE[step.state];
+  const Icon = style.icon;
+
+  return (
+    <div
+      className={cn(
+        'grid grid-cols-[1.25rem_1fr] gap-half rounded-sm px-half py-half',
+        isCurrent && 'bg-panel/70'
+      )}
+    >
+      <div className="pt-0.5">
+        <Icon
+          className={cn(
+            'size-icon-sm',
+            step.state === 'running' && 'animate-pulse'
+          )}
+          weight={step.state === 'not_started' ? 'regular' : 'fill'}
+        />
       </div>
-      <div className="truncate text-xs font-medium text-normal">
-        {value.replaceAll('_', ' ')}
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-half">
+          <span className="text-xs font-medium text-high">{step.label}</span>
+          <AutopilotStatePill state={step.state} />
+          {isCurrent && (
+            <span className="text-[10px] uppercase tracking-normal text-low">
+              Current step
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 text-xs text-low">{step.summary}</p>
+        {(step.sessionName || step.processId || step.processStatus) && (
+          <p className="mt-0.5 truncate font-ibm-plex-mono text-[11px] text-low">
+            {step.sessionName ?? 'Session'} · {step.processStatus ?? 'unknown'}
+            {step.processId ? ` · ${step.processId.slice(0, 8)}` : ''}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -493,143 +590,158 @@ export function KanbanIssuePanel({
         {(implicationAutopilotStatus || isImplicationAutopilotLoading) && (
           <div className="px-base py-base border-b">
             <div className="rounded-md border border-border bg-muted/20 px-base py-base">
-              <div className="flex items-start justify-between gap-base">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-half text-sm font-medium text-high">
-                    <RobotIcon className="size-icon-sm" weight="bold" />
-                    <span>Implication autopilot</span>
-                    {implicationAutopilotStatus?.daemonized === false && (
-                      <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
-                        status slice
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-half grid grid-cols-2 gap-x-base gap-y-half text-xs">
-                    <AutopilotFact
-                      label="Implementation"
-                      value={
-                        implicationAutopilotStatus?.implementationState ??
-                        'loading'
-                      }
-                    />
-                    <AutopilotFact
-                      label="Review"
-                      value={
-                        implicationAutopilotStatus?.autoReviewState ?? 'loading'
-                      }
-                    />
-                    <AutopilotFact
-                      label="Decision"
-                      value={
-                        implicationAutopilotStatus?.latestReviewDecision ??
-                        'loading'
-                      }
-                    />
-                    <AutopilotFact
-                      label="Fix"
-                      value={
-                        implicationAutopilotStatus?.reviewFixState ?? 'loading'
-                      }
-                    />
-                    <AutopilotFact
-                      label="PR/Merge"
-                      value={
-                        implicationAutopilotStatus?.prMergeState ?? 'loading'
-                      }
-                    />
-                    <AutopilotFact
-                      label="Next"
-                      value={
-                        implicationAutopilotStatus?.nextActionLabel ??
-                        'loading'
-                      }
-                    />
-                  </div>
-                  {implicationAutopilotStatus?.nextActionDescription && (
+              <div className="flex flex-col gap-base">
+                <div className="flex items-start justify-between gap-base">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-half text-sm font-medium text-high">
+                      <RobotIcon className="size-icon-sm" weight="bold" />
+                      <span>Implication autopilot</span>
+                      {implicationAutopilotStatus?.currentStepLabel && (
+                        <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
+                          {implicationAutopilotStatus.currentStepLabel}
+                        </span>
+                      )}
+                      {implicationAutopilotStatus?.daemonized === false && (
+                        <span className="rounded-sm bg-panel px-half py-0.5 text-[10px] uppercase tracking-normal text-low">
+                          status slice
+                        </span>
+                      )}
+                    </div>
                     <p className="mt-half text-xs text-low">
-                      {implicationAutopilotStatus.nextActionDescription}
+                      {implicationAutopilotStatus?.nextActionDescription ??
+                        'Loading autopilot status.'}
                     </p>
-                  )}
-                  {implicationAutopilotStatus?.latestReviewExcerpt && (
-                    <p className="mt-half line-clamp-3 text-xs text-low">
-                      {implicationAutopilotStatus.latestReviewExcerpt}
-                    </p>
-                  )}
-                  {implicationAutopilotStatus?.blocker && (
-                    <p className="mt-half text-xs text-warning">
-                      {implicationAutopilotStatus.blocker}
-                    </p>
-                  )}
-                  {implicationAutopilotStatus && (
-                    <p className="mt-half text-[11px] text-low">
-                      Uses Vibe Kanban Codex review sessions with{' '}
-                      {implicationAutopilotStatus.defaultModel},{' '}
-                      {implicationAutopilotStatus.defaultReasoning} reasoning
-                    </p>
-                  )}
-                </div>
-                <div className="flex shrink-0 items-center gap-half">
-                  {onRefreshImplicationAutopilot && (
-                    <button
-                      type="button"
-                      onClick={onRefreshImplicationAutopilot}
-                      className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors"
-                      aria-label="Refresh autopilot status"
-                      title="Refresh autopilot status"
-                    >
-                      <ArrowsClockwiseIcon
-                        className="size-icon-sm"
-                        weight="bold"
-                      />
-                    </button>
-                  )}
-                  {onStartImplicationAutoReview &&
-                    implicationAutopilotStatus?.nextAction ===
-                      'start_auto_review' && (
+                  </div>
+                  <div className="flex shrink-0 flex-wrap justify-end gap-half">
+                    {onRefreshImplicationAutopilot && (
                       <button
                         type="button"
-                        onClick={onStartImplicationAutoReview}
-                        disabled={isStartingImplicationAutoReview}
-                        className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                        onClick={onRefreshImplicationAutopilot}
+                        className="p-half rounded-sm text-low hover:text-normal hover:bg-panel transition-colors"
+                        aria-label="Refresh autopilot status"
+                        title="Refresh autopilot status"
                       >
-                        <PlayIcon className="size-icon-xs" weight="bold" />
-                        Start review
+                        <ArrowsClockwiseIcon
+                          className={cn(
+                            'size-icon-sm',
+                            isImplicationAutopilotLoading && 'animate-spin'
+                          )}
+                          weight="bold"
+                        />
                       </button>
                     )}
-                  {onStartImplicationReviewFix &&
-                    implicationAutopilotStatus?.nextAction ===
-                      'start_review_fix' && (
+                    {onStartImplicationAutoReview &&
+                      implicationAutopilotStatus?.nextAction ===
+                        'start_auto_review' && (
+                        <button
+                          type="button"
+                          onClick={onStartImplicationAutoReview}
+                          disabled={isStartingImplicationAutoReview}
+                          className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                        >
+                          <PlayIcon className="size-icon-xs" weight="bold" />
+                          {implicationAutopilotStatus.currentStepLabel ===
+                          'Re-review'
+                            ? 'Start re-review'
+                            : 'Start review'}
+                        </button>
+                      )}
+                    {onStartImplicationReviewFix &&
+                      implicationAutopilotStatus?.nextAction ===
+                        'start_review_fix' && (
+                        <button
+                          type="button"
+                          onClick={onStartImplicationReviewFix}
+                          disabled={isStartingImplicationReviewFix}
+                          className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                        >
+                          <PlayIcon className="size-icon-xs" weight="bold" />
+                          Start review fix
+                        </button>
+                      )}
+                    {implicationAutopilotStatus?.nextAction ===
+                      'ready_for_merge' && (
                       <button
                         type="button"
-                        onClick={onStartImplicationReviewFix}
-                        disabled={isStartingImplicationReviewFix}
-                        className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                        onClick={onOpenImplicationMergeHandoff}
+                        disabled={!onOpenImplicationMergeHandoff}
+                        className="inline-flex items-center gap-half rounded-sm border border-success px-half py-half text-xs text-success hover:bg-success/10 disabled:border-border disabled:text-low disabled:opacity-70"
+                        title={
+                          onOpenImplicationMergeHandoff
+                            ? 'Open the linked PR for manual merge handoff.'
+                            : 'Review passed. Open the workspace Git controls or linked PR to merge manually.'
+                        }
                       >
-                        <PlayIcon className="size-icon-xs" weight="bold" />
-                        Start review fix
+                        <ArrowSquareOutIcon
+                          className="size-icon-xs"
+                          weight="bold"
+                        />
+                        Open merge handoff
                       </button>
                     )}
-                  {implicationAutopilotStatus?.nextAction ===
-                    'ready_for_merge' && (
-                    <button
-                      type="button"
-                      onClick={onOpenImplicationMergeHandoff}
-                      disabled={!onOpenImplicationMergeHandoff}
-                      className="inline-flex items-center gap-half rounded-sm border border-success px-half py-half text-xs text-success hover:bg-success/10 disabled:border-border disabled:text-low disabled:opacity-70"
-                      title={
-                        onOpenImplicationMergeHandoff
-                          ? 'Open the linked PR for manual merge handoff.'
-                          : 'Review passed. Open the workspace Git controls or linked PR to merge manually.'
-                      }
-                    >
-                      <ArrowSquareOutIcon
-                        className="size-icon-xs"
-                        weight="bold"
-                      />
-                      Ready to merge
-                    </button>
-                  )}
+                  </div>
                 </div>
+
+                {implicationAutopilotStatus ? (
+                  <>
+                    <div className="space-y-0.5">
+                      {implicationAutopilotStatus.steps.map((step) => (
+                        <AutopilotStepRow
+                          key={step.label}
+                          step={step}
+                          isCurrent={
+                            step.label ===
+                            implicationAutopilotStatus.currentStepLabel
+                          }
+                        />
+                      ))}
+                    </div>
+
+                    <div className="rounded-sm border border-border bg-panel/50 px-half py-half">
+                      <div className="flex flex-wrap items-center gap-half text-xs">
+                        <span className="font-medium text-high">
+                          Review decision
+                        </span>
+                        <span className="text-low">
+                          {implicationAutopilotStatus.latestReviewDecision}
+                        </span>
+                      </div>
+                      {implicationAutopilotStatus.latestReviewExcerpt && (
+                        <p className="mt-half line-clamp-3 text-xs text-low">
+                          {implicationAutopilotStatus.latestReviewExcerpt}
+                        </p>
+                      )}
+                      {implicationAutopilotStatus.blocker && (
+                        <p className="mt-half text-xs text-warning">
+                          {implicationAutopilotStatus.blocker}
+                        </p>
+                      )}
+                    </div>
+
+                    <div
+                      className={cn(
+                        'rounded-sm border px-half py-half text-xs',
+                        implicationAutopilotStatus.tokenSafetyState ===
+                          'blocked'
+                          ? 'border-warning/50 bg-warning/10 text-warning'
+                          : 'border-border bg-panel/50 text-low'
+                      )}
+                    >
+                      <span className="font-medium text-high">
+                        Token safety:{' '}
+                      </span>
+                      {implicationAutopilotStatus.tokenSafetyNote}
+                      <span className="block pt-0.5 text-[11px] text-low">
+                        Uses {implicationAutopilotStatus.defaultModel},{' '}
+                        {implicationAutopilotStatus.defaultReasoning} reasoning.
+                        Completed sessions with unseen output are idle; only
+                        running sessions are spending tokens.
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-low">Loading status timeline.</p>
+                )}
               </div>
             </div>
           </div>

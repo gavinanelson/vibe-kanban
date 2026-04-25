@@ -65,6 +65,15 @@ pub enum AutopilotNextAction {
     InvestigateFailure,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AutopilotTokenSafetyState {
+    Idle,
+    Guarded,
+    Blocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AutopilotProcessSummary {
     pub id: Uuid,
@@ -95,6 +104,8 @@ pub struct ImplicationAutopilotStatus {
     pub default_model: String,
     pub default_reasoning: String,
     pub daemonized: bool,
+    pub token_safety_state: AutopilotTokenSafetyState,
+    pub token_safety_note: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -469,6 +480,14 @@ async fn build_status(
         review_fix_process,
         &pr_merge_state,
     );
+    let (token_safety_state, token_safety_note) = token_safety(
+        &next_action,
+        blocker.as_deref(),
+        implementation_process,
+        auto_review_process,
+        review_fix_process,
+        &latest_review_decision,
+    );
 
     Ok(ImplicationAutopilotStatus {
         workspace_id: workspace.id,
@@ -487,6 +506,8 @@ async fn build_status(
         default_model: DEFAULT_CODEX_MODEL.to_string(),
         default_reasoning: DEFAULT_CODEX_REASONING.to_string(),
         daemonized: false,
+        token_safety_state,
+        token_safety_note,
     })
 }
 
@@ -936,6 +957,60 @@ fn next_action_name(action: &AutopilotNextAction) -> &'static str {
     }
 }
 
+fn token_safety(
+    next_action: &AutopilotNextAction,
+    blocker: Option<&str>,
+    implementation: Option<&ProcessRow>,
+    auto_review: Option<&ProcessRow>,
+    review_fix: Option<&ProcessRow>,
+    decision: &AutopilotDecision,
+) -> (AutopilotTokenSafetyState, String) {
+    let running_process = [implementation, auto_review, review_fix]
+        .into_iter()
+        .flatten()
+        .any(|row| row.status == ExecutionProcessStatus::Running);
+
+    if running_process {
+        return (
+            AutopilotTokenSafetyState::Guarded,
+            "A single agent session is running. Start controls stay hidden until the server reports the next safe action.".to_string(),
+        );
+    }
+
+    if matches!(
+        next_action,
+        AutopilotNextAction::NoWorkspace | AutopilotNextAction::InvestigateFailure
+    ) {
+        return (
+            AutopilotTokenSafetyState::Blocked,
+            blocker
+                .unwrap_or("Autopilot is blocked before any new Codex session can start.")
+                .to_string(),
+        );
+    }
+
+    if next_action == &AutopilotNextAction::StartAutoReview
+        && decision == &AutopilotDecision::RequestChanges
+    {
+        return (
+            AutopilotTokenSafetyState::Guarded,
+            "Auto-review reruns are guarded: the server only exposes this explicit rerun after a completed review-fix and while no agent is running.".to_string(),
+        );
+    }
+
+    if next_action == &AutopilotNextAction::StartAutoReview {
+        return (
+            AutopilotTokenSafetyState::Guarded,
+            "Auto-review starts are guarded: the server blocks duplicate running processes and repeated reruns without a review-fix or updated workflow state.".to_string(),
+        );
+    }
+
+    (
+        AutopilotTokenSafetyState::Idle,
+        "No Codex review or fix session is running. Completed sessions with unseen output are idle and are not spending tokens.".to_string(),
+    )
+}
+
 fn next_action(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
@@ -1338,5 +1413,25 @@ mod tests {
 
         assert_eq!(next_action, AutopilotNextAction::ReadyForMerge);
         assert!(blocker.unwrap().contains("not daemonized"));
+    }
+
+    #[test]
+    fn token_safety_explains_guarded_re_review_without_running_tokens() {
+        let implementation = completed_process("Implementation", 0);
+        let review = completed_process("Auto review - Codex (medium)", 0);
+        let review_fix = completed_process("Review fix - Codex (medium)", 0);
+
+        let (state, note) = token_safety(
+            &AutopilotNextAction::StartAutoReview,
+            Some("Review fix completed; rerun auto-review."),
+            Some(&implementation),
+            Some(&review),
+            Some(&review_fix),
+            &AutopilotDecision::RequestChanges,
+        );
+
+        assert_eq!(state, AutopilotTokenSafetyState::Guarded);
+        assert!(note.contains("explicit rerun"));
+        assert!(note.contains("no agent is running"));
     }
 }
