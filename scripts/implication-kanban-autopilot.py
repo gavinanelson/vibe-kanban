@@ -168,10 +168,13 @@ def cards() -> list[Card]:
 
 
 def status_id(name: str) -> str:
-    rows = psql(f"select 'id' as id union all select id::text from project_statuses where project_id='{PROJECT_ID}' and name={sql_lit(name)} limit 2;")
+    rows = psql(
+        f"select id::text as id from project_statuses "
+        f"where project_id={sql_lit(PROJECT_ID)} and name={sql_lit(name)} limit 1;"
+    )
     if not rows:
         raise RuntimeError(f"missing status {name}")
-    return rows[-1]["id"]
+    return rows[0]["id"]
 
 
 def local_processes(workspace_id: str) -> list[dict[str, Any]]:
