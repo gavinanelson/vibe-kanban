@@ -847,11 +847,11 @@ export function KanbanContainer() {
       issues.map((issue) => [issue.id, issue.status_id])
     );
     const previousStatuses = previousIssueStatusByIdRef.current;
-    previousIssueStatusByIdRef.current = currentStatuses;
 
     // Seed the previous-status map on first load without firing reviews for
     // cards that were already waiting in review before this client mounted.
     if (!previousStatuses) {
+      previousIssueStatusByIdRef.current = currentStatuses;
       return;
     }
 
@@ -862,20 +862,47 @@ export function KanbanContainer() {
     );
 
     if (reviewStatusIds.size === 0) {
+      previousIssueStatusByIdRef.current = currentStatuses;
       return;
     }
 
-    for (const issue of issues) {
+    const reviewTransitions = issues.filter((issue) => {
       const previousStatusId = previousStatuses.get(issue.id);
-      if (
-        previousStatusId &&
+      return (
+        !!previousStatusId &&
         previousStatusId !== issue.status_id &&
         reviewStatusIds.has(issue.status_id)
-      ) {
-        void startAutoReviewForIssue(issue.id);
-      }
+      );
+    });
+
+    const waitingForWorkspaceContext = reviewTransitions.some((issue) => {
+      const linkedWorkspaces = getWorkspacesForIssue(issue.id).filter(
+        (workspace) => !workspace.archived && !!workspace.local_workspace_id
+      );
+
+      return (
+        linkedWorkspaces.length > 0 &&
+        !getAutoReviewLocalWorkspaceId(linkedWorkspaces, localWorkspacesById)
+      );
+    });
+
+    if (waitingForWorkspaceContext) {
+      return;
     }
-  }, [issues, statuses, startAutoReviewForIssue, isWorkspacesListLoading]);
+
+    previousIssueStatusByIdRef.current = currentStatuses;
+
+    for (const issue of reviewTransitions) {
+      void startAutoReviewForIssue(issue.id);
+    }
+  }, [
+    getWorkspacesForIssue,
+    issues,
+    statuses,
+    startAutoReviewForIssue,
+    isWorkspacesListLoading,
+    localWorkspacesById,
+  ]);
 
   // Calculate sort_order based on column index and issue position
   // Formula: 1000 * [COLUMN_INDEX] + [ISSUE_INDEX] (both 1-based)
