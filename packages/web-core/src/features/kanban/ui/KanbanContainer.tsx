@@ -872,25 +872,6 @@ export function KanbanContainer() {
       pendingIssueIds: pendingAutoReviewIssueIdsRef.current,
     });
 
-    const waitingForWorkspaceContext = reviewIssueIds.some((issueId) => {
-      const linkedWorkspaces = getWorkspacesForIssue(issueId).filter(
-        (workspace) => !workspace.archived && !!workspace.local_workspace_id
-      );
-
-      return (
-        linkedWorkspaces.length > 0 &&
-        !getAutoReviewLocalWorkspaceId(linkedWorkspaces, localWorkspacesById)
-      );
-    });
-
-    if (waitingForWorkspaceContext) {
-      for (const issueId of reviewIssueIds) {
-        pendingAutoReviewIssueIdsRef.current.add(issueId);
-      }
-      previousIssueStatusByIdRef.current = currentStatuses;
-      return;
-    }
-
     previousIssueStatusByIdRef.current = currentStatuses;
 
     for (const issueId of reviewIssueIds) {
