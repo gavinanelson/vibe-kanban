@@ -256,6 +256,10 @@ impl GitHostProvider for AzureDevOpsProvider {
         Err(GitHostError::UnsupportedProvider)
     }
 
+    async fn merge_pr(&self, _pr_url: &str) -> Result<PullRequestDetail, GitHostError> {
+        Err(GitHostError::UnsupportedProvider)
+    }
+
     fn provider_kind(&self) -> ProviderKind {
         ProviderKind::AzureDevOps
     }
