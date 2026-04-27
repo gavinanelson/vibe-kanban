@@ -372,7 +372,7 @@ async fn start_auto_review_for_workspace(
     let review_fix_process = rows
         .iter()
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
-    let (latest_review_decision, _, _) =
+    let (latest_review_decision, _, latest_review_process) =
         decide_from_review_attempts(deployment, &review_processes).await;
     let pr_merge_state = infer_pr_merge_state(workspace, &latest_review_decision);
 
@@ -380,6 +380,7 @@ async fn start_auto_review_for_workspace(
         workspace,
         implementation_process,
         &latest_review_decision,
+        latest_review_process,
         review_fix_process,
         &pr_merge_state,
         rerun,
@@ -466,13 +467,14 @@ async fn start_review_fix_for_workspace(
     let review_fix_process = rows
         .iter()
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
-    let (latest_review_decision, latest_review_excerpt, _) =
+    let (latest_review_decision, latest_review_excerpt, latest_review_process) =
         decide_from_review_attempts(deployment, &review_processes).await;
 
     if let Err(message) = review_fix_start_gate(
         workspace,
         implementation_process,
         &latest_review_decision,
+        latest_review_process,
         review_fix_process,
     ) {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
@@ -555,8 +557,8 @@ async fn advance_workspace_once(
     let status = build_status(deployment, workspace).await?;
     match status.next_action {
         AutopilotNextAction::StartAutoReview => {
-            let rerun = status.latest_review_decision == AutopilotDecision::RequestChanges
-                && status.review_fix_state == "completed";
+            let rerun = status.next_action == AutopilotNextAction::StartAutoReview
+                && status.latest_review_decision == AutopilotDecision::RequestChanges;
             start_auto_review_for_workspace(deployment, workspace, rerun).await?;
             if let Some(issue) = issue.as_ref() {
                 promote_issue_to_in_review(&client, issue).await?;
@@ -761,6 +763,7 @@ async fn build_status(
         workspace,
         implementation_process,
         &latest_review_decision,
+        auto_review_process,
         review_fix_process,
         &pr_merge_state,
     );
@@ -777,6 +780,7 @@ async fn build_status(
         blocker.as_deref(),
         implementation_process,
         &latest_review_decision,
+        auto_review_process,
         review_fix_process,
         &pr_merge_state,
     );
@@ -1192,6 +1196,7 @@ fn review_fix_start_gate(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
 ) -> Result<(), String> {
     if workspace.archived || workspace.worktree_deleted {
@@ -1215,8 +1220,17 @@ fn review_fix_start_gate(
         if row.status == ExecutionProcessStatus::Running {
             return Err("Review fix is already running.".to_string());
         }
-        if row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0) {
-            return Err("Review fix already completed; rerun auto-review next.".to_string());
+        if review_fix_completed_after_review(row, latest_review) {
+            return Err(
+                "Review fix already completed after the latest review; rerun auto-review next."
+                    .to_string(),
+            );
+        }
+        if review_fix_attempted_after_review(row, latest_review) {
+            return Err(
+                "Review fix already ran after the latest review and did not complete cleanly."
+                    .to_string(),
+            );
         }
     }
     Ok(())
@@ -1226,6 +1240,7 @@ fn auto_review_start_gate(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
     rerun: bool,
@@ -1234,6 +1249,7 @@ fn auto_review_start_gate(
         workspace,
         implementation,
         decision,
+        latest_review,
         review_fix,
         pr_merge_state,
     );
@@ -1246,9 +1262,8 @@ fn auto_review_start_gate(
     }
 
     if decision == &AutopilotDecision::RequestChanges {
-        let review_fix_completed = review_fix.is_some_and(|row| {
-            row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0)
-        });
+        let review_fix_completed =
+            review_fix.is_some_and(|row| review_fix_completed_after_review(row, latest_review));
         if review_fix_completed && !rerun {
             return Err(
                 "Auto-review rerun must be explicit after review fix completes.".to_string(),
@@ -1339,6 +1354,7 @@ fn workflow_state(
     blocker: Option<&str>,
     _implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     _pr_merge_state: &str,
 ) -> (AutopilotWorkflowState, String) {
@@ -1356,9 +1372,8 @@ fn workflow_state(
         ),
         AutopilotNextAction::StartAutoReview => {
             if decision == &AutopilotDecision::RequestChanges
-                && review_fix.is_some_and(|row| {
-                    row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0)
-                })
+                && review_fix
+                    .is_some_and(|row| review_fix_completed_after_review(row, latest_review))
             {
                 (
                     AutopilotWorkflowState::ReadyToAdvance,
@@ -1431,10 +1446,44 @@ fn duplicate_prevention_key(
     )
 }
 
+fn review_fix_completed_after_review(
+    review_fix: &ProcessRow,
+    latest_review: Option<&ProcessRow>,
+) -> bool {
+    review_fix.status == ExecutionProcessStatus::Completed
+        && review_fix.exit_code == Some(0)
+        && review_fix_attempted_after_review(review_fix, latest_review)
+}
+
+fn review_fix_attempted_after_review(
+    review_fix: &ProcessRow,
+    latest_review: Option<&ProcessRow>,
+) -> bool {
+    let Some(latest_review) = latest_review else {
+        return false;
+    };
+
+    process_time_after(&review_fix.started_at, review_reference_time(latest_review))
+}
+
+fn review_reference_time(review: &ProcessRow) -> &str {
+    review.completed_at.as_deref().unwrap_or(&review.started_at)
+}
+
+fn process_time_after(candidate: &str, reference: &str) -> bool {
+    let candidate_time = DateTime::parse_from_rfc3339(candidate);
+    let reference_time = DateTime::parse_from_rfc3339(reference);
+    match (candidate_time, reference_time) {
+        (Ok(candidate_time), Ok(reference_time)) => candidate_time > reference_time,
+        _ => candidate > reference,
+    }
+}
+
 fn next_action(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
 ) -> (AutopilotNextAction, Option<String>) {
@@ -1471,14 +1520,14 @@ fn next_action(
             Some(row) if row.status == ExecutionProcessStatus::Running => {
                 (AutopilotNextAction::WaitForReviewFix, None)
             }
-            Some(row)
-                if row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0) =>
-            {
-                (
-                    AutopilotNextAction::StartAutoReview,
-                    Some("Review fix completed; rerun auto-review.".to_string()),
-                )
-            }
+            Some(row) if review_fix_completed_after_review(row, latest_review) => (
+                AutopilotNextAction::StartAutoReview,
+                Some("Review fix completed; rerun auto-review.".to_string()),
+            ),
+            Some(row) if review_fix_attempted_after_review(row, latest_review) => (
+                AutopilotNextAction::InvestigateFailure,
+                Some("Review fix did not complete cleanly.".to_string()),
+            ),
             _ => (AutopilotNextAction::StartReviewFix, None),
         },
         // TODO(implication-autopilot): wire a safe PR merge helper here when the
@@ -1647,6 +1696,37 @@ mod tests {
 
     fn completed_process(name: &str, exit_code: i64) -> ProcessRow {
         process(name, ExecutionProcessStatus::Completed, Some(exit_code))
+    }
+
+    fn completed_process_at(
+        name: &str,
+        exit_code: i64,
+        started_at: &str,
+        completed_at: &str,
+    ) -> ProcessRow {
+        ProcessRow {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_name: Some(name.to_string()),
+            status: ExecutionProcessStatus::Completed,
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+            exit_code: Some(exit_code),
+            started_at: started_at.to_string(),
+            completed_at: Some(completed_at.to_string()),
+        }
+    }
+
+    fn failed_process_at(name: &str, started_at: &str, completed_at: &str) -> ProcessRow {
+        ProcessRow {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_name: Some(name.to_string()),
+            status: ExecutionProcessStatus::Failed,
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+            exit_code: Some(1),
+            started_at: started_at.to_string(),
+            completed_at: Some(completed_at.to_string()),
+        }
     }
 
     fn relationship(issue_id: Uuid, blocker: Uuid) -> BatchAdvanceRelationship {
@@ -1842,6 +1922,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                None,
                 None
             ),
             Ok(())
@@ -1858,6 +1939,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::Pass,
+                None,
                 None
             ),
             Err("Review fix can only start after auto-review requests changes.".to_string())
@@ -1886,6 +1968,7 @@ mod tests {
                 Some(&implementation),
                 &AutopilotDecision::Missing,
                 None,
+                None,
                 "waiting_for_review",
                 false,
             ),
@@ -1896,7 +1979,18 @@ mod tests {
     #[test]
     fn action_gating_requires_explicit_rerun_after_review_fix_completes() {
         let implementation = completed_process("Implementation", 0);
-        let review_fix = completed_process("Review fix", 0);
+        let review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let review_fix = completed_process_at(
+            "Review fix",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
         let workspace = workspace();
 
         assert_eq!(
@@ -1904,6 +1998,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
                 false,
@@ -1916,6 +2011,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
                 true,
@@ -1927,6 +2023,7 @@ mod tests {
     #[test]
     fn action_gating_blocks_auto_review_when_review_fix_is_next() {
         let implementation = completed_process("Implementation", 0);
+        let review = completed_process("Auto review - Codex (medium)", 0);
         let workspace = workspace();
 
         assert_eq!(
@@ -1934,11 +2031,131 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 None,
                 "blocked_by_review",
                 false,
             ),
             Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_review_requires_a_newer_review_fix_before_re_review() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review rerun - Codex (medium)",
+            0,
+            "2026-04-25T12:40:00Z",
+            "2026-04-25T12:50:00Z",
+        );
+        let old_review_fix = completed_process_at(
+            "Review fix - Codex (medium)",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::RequestChanges,
+            Some(&latest_review),
+            Some(&old_review_fix),
+            "blocked_by_review",
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::StartReviewFix);
+        assert_eq!(blocker, None);
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&old_review_fix),
+                "blocked_by_review",
+                true,
+            ),
+            Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
+        );
+    }
+
+    #[test]
+    fn review_fix_gate_blocks_duplicate_fix_after_latest_review() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let review_fix = completed_process_at(
+            "Review fix - Codex (medium)",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&review_fix),
+            ),
+            Err(
+                "Review fix already completed after the latest review; rerun auto-review next."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn failed_review_fix_after_latest_review_surfaces_blocker() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let failed_review_fix = failed_process_at(
+            "Review fix - Codex (medium)",
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::RequestChanges,
+            Some(&latest_review),
+            Some(&failed_review_fix),
+            "blocked_by_review",
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
+        assert_eq!(
+            blocker,
+            Some("Review fix did not complete cleanly.".to_string())
+        );
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&failed_review_fix),
+            ),
+            Err(
+                "Review fix already ran after the latest review and did not complete cleanly."
+                    .to_string()
+            )
         );
     }
 
@@ -1950,6 +2167,7 @@ mod tests {
             &workspace,
             Some(&implementation),
             &AutopilotDecision::Pass,
+            None,
             None,
             "review_passed_merge_status_unknown",
         );
@@ -1986,6 +2204,7 @@ mod tests {
             Some("Review passed; merge handoff is visible."),
             Some(&implementation),
             &AutopilotDecision::Pass,
+            None,
             None,
             "review_passed_merge_status_unknown",
         );
