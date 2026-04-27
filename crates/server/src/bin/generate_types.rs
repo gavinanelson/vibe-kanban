@@ -97,6 +97,8 @@ fn generate_types_content() -> String {
         server::routes::implication_autopilot::AutopilotAdvanceAction::decl(),
         server::routes::implication_autopilot::BatchCardQueueState::decl(),
         server::routes::implication_autopilot::AutopilotTokenSafetyState::decl(),
+        server::routes::implication_autopilot::AutopilotPrChecksState::decl(),
+        server::routes::implication_autopilot::AutopilotPrStatus::decl(),
         server::routes::implication_autopilot::AutopilotProcessSummary::decl(),
         server::routes::implication_autopilot::ImplicationAutopilotStatus::decl(),
         server::routes::implication_autopilot::ImplicationAutopilotAdvanceResponse::decl(),

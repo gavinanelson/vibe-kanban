@@ -208,6 +208,29 @@ export type ImplicationAutopilotTokenSafetyState =
   | 'guarded'
   | 'blocked';
 
+export type ImplicationAutopilotPrChecksState =
+  | 'unknown'
+  | 'no_checks'
+  | 'pending'
+  | 'passing'
+  | 'failing';
+
+export interface ImplicationAutopilotPrStatus {
+  number: number;
+  url: string;
+  state: string;
+  is_draft: boolean;
+  head_sha?: string | null;
+  base_branch?: string | null;
+  mergeable?: string | null;
+  merge_state_status?: string | null;
+  merge_commit_sha?: string | null;
+  checks_state: ImplicationAutopilotPrChecksState;
+  checks_summary?: string | null;
+  merge_blocker?: string | null;
+  source: string;
+}
+
 export type ImplicationAutopilotWorkflowState =
   | 'queued'
   | 'blocked_by_dependencies'
@@ -226,6 +249,7 @@ export type ImplicationAutopilotAdvanceAction =
   | 'promoted_to_review'
   | 'started_auto_review'
   | 'started_review_fix'
+  | 'merged_pull_request'
   | 'merge_handoff'
   | 'blocked';
 
@@ -271,6 +295,7 @@ export interface ImplicationAutopilotStatus {
   duplicate_prevention_key: string;
   token_safety_state: ImplicationAutopilotTokenSafetyState;
   token_safety_note: string;
+  pr_status?: ImplicationAutopilotPrStatus | null;
 }
 
 export interface ImplicationAutopilotAdvanceResponse {
