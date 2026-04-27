@@ -650,7 +650,7 @@ async fn advance_merge_done_once(
             Ok((AutopilotAdvanceAction::Blocked, Some(blocker)))
         }
         AutopilotMergePlan::AttemptPrMerge => {
-            match merge_single_open_pull_request(deployment, workspace).await {
+            match merge_open_pull_requests(deployment, workspace).await {
                 Ok(()) => {
                     reconcile_workspace_done(deployment, workspace, issue).await?;
                     Ok((AutopilotAdvanceAction::Noop, None))
@@ -683,74 +683,203 @@ fn merge_plan_from_state(pr_merge_state: &str) -> AutopilotMergePlan {
     }
 }
 
-async fn merge_single_open_pull_request(
+async fn merge_open_pull_requests(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
 ) -> Result<(), String> {
     let merges = Merge::find_by_workspace_id(&deployment.db().pool, workspace.id)
         .await
         .map_err(|err| format!("Failed to inspect linked pull requests: {err}"))?;
-    let open_prs = merges
+    let linked_prs = merges
         .iter()
         .filter_map(|merge| match merge {
-            Merge::Pr(pr) if matches!(pr.pr_info.status, MergeStatus::Open) => Some(pr),
+            Merge::Pr(pr) => Some(pr.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
 
-    let [open_pr] = open_prs.as_slice() else {
-        return Err(format!(
-            "Expected exactly one open pull request to merge, found {}.",
-            open_prs.len()
-        ));
-    };
+    if linked_prs.is_empty() {
+        return Err(linked_pr_merge_completion_blocker(&[]).unwrap_or_else(|| {
+            "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
+                .to_string()
+        }));
+    }
 
-    let git_host = GitHostService::from_url(&open_pr.pr_info.url)
-        .map_err(|err| format!("Cannot identify pull request provider: {err}"))?;
-    let current_pr_info = git_host
-        .get_pr_status(&open_pr.pr_info.url)
-        .await
-        .map_err(|err| format!("Failed to refresh PR merge status from GitHub: {err}"))?;
-    if !matches!(
-        current_pr_info.status,
-        MergeStatus::Open | MergeStatus::Merged
-    ) {
-        persist_pr_status(deployment, workspace, open_pr, current_pr_info).await?;
-        return Err(
-            "Linked pull request is no longer open or mergeable; refreshed PR status and blocked auto-merge."
+    let mut final_statuses = Vec::with_capacity(linked_prs.len());
+    let mut blockers = Vec::new();
+    for linked_pr in &linked_prs {
+        if matches!(linked_pr.pr_info.status, MergeStatus::Merged) {
+            final_statuses.push(MergeStatus::Merged);
+            continue;
+        }
+
+        let git_host = match GitHostService::from_url(&linked_pr.pr_info.url) {
+            Ok(git_host) => git_host,
+            Err(err) => {
+                blockers.push(format!(
+                    "Cannot identify pull request provider for PR #{} ({}): {err}",
+                    linked_pr.pr_info.number, linked_pr.pr_info.url
+                ));
+                final_statuses.push(linked_pr.pr_info.status.clone());
+                continue;
+            }
+        };
+        let current_pr_info = match git_host.get_pr_status(&linked_pr.pr_info.url).await {
+            Ok(pr_info) => pr_info,
+            Err(err) => {
+                blockers.push(format!(
+                    "Failed to refresh PR #{} ({}) merge status from GitHub: {err}",
+                    linked_pr.pr_info.number, linked_pr.pr_info.url
+                ));
+                final_statuses.push(linked_pr.pr_info.status.clone());
+                continue;
+            }
+        };
+        if !matches!(
+            current_pr_info.status,
+            MergeStatus::Open | MergeStatus::Merged
+        ) {
+            let status = current_pr_info.status.clone();
+            if let Err(err) =
+                persist_pr_status(deployment, workspace, linked_pr, current_pr_info).await
+            {
+                blockers.push(format!(
+                    "PR #{} ({}) refreshed as {}, but status persistence failed: {err}",
+                    linked_pr.pr_info.number,
+                    linked_pr.pr_info.url,
+                    merge_status_label(&status)
+                ));
+            }
+            final_statuses.push(status.clone());
+            blockers.push(format!(
+                "Cannot complete autopilot merge: PR #{} ({}) is {} after refresh.",
+                linked_pr.pr_info.number,
+                linked_pr.pr_info.url,
+                merge_status_label(&status)
+            ));
+            continue;
+        }
+
+        let pr_info = if matches!(current_pr_info.status, MergeStatus::Merged) {
+            current_pr_info
+        } else {
+            let pr_info = match git_host.merge_pr(&linked_pr.pr_info.url).await {
+                Ok(pr_info) => pr_info,
+                Err(err) => {
+                    let persist_result =
+                        persist_pr_status(deployment, workspace, linked_pr, current_pr_info).await;
+                    let persist_note = persist_result
+                        .err()
+                        .map(|persist_err| {
+                            format!(" Refreshed PR status persistence also failed: {persist_err}.")
+                        })
+                        .unwrap_or_default();
+                    blockers.push(format!(
+                        "PR #{} ({}) merge is blocked by GitHub requirements: {err}.{persist_note}",
+                        linked_pr.pr_info.number, linked_pr.pr_info.url
+                    ));
+                    final_statuses.push(MergeStatus::Open);
+                    continue;
+                }
+            };
+
+            if !matches!(pr_info.status, MergeStatus::Merged) {
+                let status = pr_info.status.clone();
+                if let Err(err) = persist_pr_status(deployment, workspace, linked_pr, pr_info).await
+                {
+                    blockers.push(format!(
+                        "PR #{} ({}) status persistence failed after merge attempt: {err}",
+                        linked_pr.pr_info.number, linked_pr.pr_info.url
+                    ));
+                }
+                final_statuses.push(status.clone());
+                blockers.push(format!(
+                    "GitHub accepted the merge command for PR #{} ({}), but it is {} instead of merged.",
+                    linked_pr.pr_info.number,
+                    linked_pr.pr_info.url,
+                    merge_status_label(&status)
+                ));
+                continue;
+            }
+            pr_info
+        };
+
+        if let Err(err) = persist_pr_status(deployment, workspace, linked_pr, pr_info).await {
+            blockers.push(format!(
+                "PR #{} ({}) merged, but local/remote PR status update failed: {err}",
+                linked_pr.pr_info.number, linked_pr.pr_info.url
+            ));
+        }
+        final_statuses.push(MergeStatus::Merged);
+    }
+
+    if blockers.is_empty() {
+        linked_pr_merge_completion_blocker(&final_statuses).map_or(Ok(()), Err)
+    } else {
+        Err(blockers.join(" "))
+    }
+}
+
+fn linked_pr_merge_completion_blocker(statuses: &[MergeStatus]) -> Option<String> {
+    if statuses.is_empty() {
+        return Some(
+            "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
                 .to_string(),
         );
     }
 
-    let pr_info = if matches!(current_pr_info.status, MergeStatus::Merged) {
-        current_pr_info
-    } else {
-        let pr_info = git_host
-            .merge_pr(&open_pr.pr_info.url)
-            .await
-            .map_err(|err| format!("PR merge is blocked by GitHub requirements: {err}"))?;
+    let open_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Open))
+        .count();
+    if open_count > 0 {
+        return Some(format!(
+            "Not all linked pull requests are merged yet: {open_count} open PR{} remain{} after merge attempts.",
+            if open_count == 1 { "" } else { "s" },
+            if open_count == 1 { "s" } else { "" }
+        ));
+    }
 
-        if !matches!(pr_info.status, MergeStatus::Merged) {
-            persist_pr_status(deployment, workspace, open_pr, pr_info).await?;
-            return Err(
-                "GitHub accepted the merge command but the pull request is not merged yet."
-                    .to_string(),
-            );
-        }
-        pr_info
-    };
+    let closed_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Closed))
+        .count();
+    if closed_count > 0 {
+        return Some(format!(
+            "Cannot complete autopilot merge: {closed_count} linked PR{} {} closed.",
+            if closed_count == 1 { "" } else { "s" },
+            if closed_count == 1 { "is" } else { "are" }
+        ));
+    }
 
-    persist_pr_status(deployment, workspace, open_pr, pr_info)
-        .await
-        .map_err(|err| format!("PR merged but local/remote PR status update failed: {err}"))?;
+    let unknown_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Unknown))
+        .count();
+    if unknown_count > 0 {
+        return Some(format!(
+            "Cannot complete autopilot merge: {unknown_count} linked PR{} ha{} unknown status.",
+            if unknown_count == 1 { "" } else { "s" },
+            if unknown_count == 1 { "s" } else { "ve" }
+        ));
+    }
 
-    Ok(())
+    None
+}
+
+fn merge_status_label(status: &MergeStatus) -> &'static str {
+    match status {
+        MergeStatus::Open => "open",
+        MergeStatus::Merged => "merged",
+        MergeStatus::Closed => "closed",
+        MergeStatus::Unknown => "unknown",
+    }
 }
 
 async fn persist_pr_status(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
-    open_pr: &PrMerge,
+    linked_pr: &PrMerge,
     pr_detail: PullRequestDetail,
 ) -> Result<(), String> {
     let status = pr_detail.status.clone();
@@ -775,7 +904,7 @@ async fn persist_pr_status(
             status: pull_request_status_from_merge_status(&status),
             merged_at,
             merge_commit_sha,
-            target_branch_name: open_pr.target_branch_name.clone(),
+            target_branch_name: linked_pr.target_branch_name.clone(),
             local_workspace_id: workspace.id,
         };
         tokio::spawn(async move {
@@ -2509,6 +2638,52 @@ mod tests {
         let plan = merge_plan_from_state("merged_pending_done");
 
         assert_eq!(plan, AutopilotMergePlan::ReconcileDone);
+    }
+
+    #[test]
+    fn linked_pr_completion_allows_multiple_merged_pull_requests() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Merged, MergeStatus::Merged]),
+            None
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_blocks_when_any_pull_request_remains_open() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[
+                MergeStatus::Merged,
+                MergeStatus::Open,
+                MergeStatus::Merged
+            ]),
+            Some(
+                "Not all linked pull requests are merged yet: 1 open PR remains after merge attempts."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_blocks_closed_or_unknown_pull_requests() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Merged, MergeStatus::Closed]),
+            Some("Cannot complete autopilot merge: 1 linked PR is closed.".to_string())
+        );
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Unknown]),
+            Some("Cannot complete autopilot merge: 1 linked PR has unknown status.".to_string())
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_reports_missing_prs_as_recoverable() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[]),
+            Some(
+                "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
+                    .to_string()
+            )
+        );
     }
 
     #[test]
