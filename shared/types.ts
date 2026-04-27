@@ -266,11 +266,29 @@ export type AutopilotDecision = "missing" | "running" | "pass" | "request_change
 
 export type AutopilotNextAction = "no_workspace" | "wait_for_implementation" | "start_auto_review" | "wait_for_auto_review" | "start_review_fix" | "wait_for_review_fix" | "ready_for_merge" | "merge_wait" | "done" | "investigate_failure";
 
+export type AutopilotWorkflowState = "queued" | "blocked_by_dependencies" | "implementation_running" | "review_running" | "review_passed" | "review_requested_changes" | "review_fix_running" | "merge_waiting" | "done" | "blocked" | "ready_to_advance";
+
+export type AutopilotAdvanceAction = "noop" | "promoted_to_review" | "started_auto_review" | "started_review_fix" | "merge_handoff" | "blocked";
+
+export type BatchCardQueueState = "queued" | "blocked_by_dependencies" | "runnable" | "active" | "done";
+
 export type AutopilotTokenSafetyState = "idle" | "guarded" | "blocked";
 
 export type AutopilotProcessSummary = { id: string, session_id: string, session_name: string | null, status: ExecutionProcessStatus, run_reason: ExecutionProcessRunReason, exit_code: bigint | null, started_at: string, completed_at: string | null, };
 
-export type ImplicationAutopilotStatus = { workspace_id: string, workspace_name: string | null, implementation_state: string, auto_review_state: AutopilotDecision, latest_review_decision: AutopilotDecision, latest_review_excerpt: string | null, review_fix_state: string, pr_merge_state: string, next_action: AutopilotNextAction, blocker: string | null, implementation_process: AutopilotProcessSummary | null, auto_review_process: AutopilotProcessSummary | null, review_fix_process: AutopilotProcessSummary | null, default_model: string, default_reasoning: string, daemonized: boolean, token_safety_state: AutopilotTokenSafetyState, token_safety_note: string, };
+export type ImplicationAutopilotStatus = { workspace_id: string, workspace_name: string | null, implementation_state: string, auto_review_state: AutopilotDecision, latest_review_decision: AutopilotDecision, latest_review_excerpt: string | null, review_fix_state: string, pr_merge_state: string, next_action: AutopilotNextAction, blocker: string | null, implementation_process: AutopilotProcessSummary | null, auto_review_process: AutopilotProcessSummary | null, review_fix_process: AutopilotProcessSummary | null, default_model: string, default_reasoning: string, daemonized: boolean, workflow_state: AutopilotWorkflowState, workflow_state_reason: string, duplicate_prevention_key: string, token_safety_state: AutopilotTokenSafetyState, token_safety_note: string, };
+
+export type ImplicationAutopilotAdvanceResponse = { action_taken: AutopilotAdvanceAction, status: ImplicationAutopilotStatus, };
+
+export type BatchAdvanceCard = { issue_id: string, workspace_id: string | null, state: BatchCardQueueState, blockers: Array<string>, action: AutopilotNextAction | null, reason: string, };
+
+export type BatchAdvancePlan = { max_active: number, active_count: number, cards: Array<BatchAdvanceCard>, };
+
+export type BatchAdvancePlanRequest = { max_active: number, cards: Array<BatchAdvancePlanCandidate>, relationships: Array<BatchAdvanceRelationship>, };
+
+export type BatchAdvanceRelationship = { issue_id: string, blocking_issue_id: string, };
+
+export type BatchAdvancePlanCandidate = { issue_id: string, workspace_id: string | null, done: boolean, active: boolean, next_action: AutopilotNextAction | null, blockers: Array<string>, };
 
 export type StartAutopilotReviewRequest = { rerun: boolean, github_repo_full_name: string | null, };
 

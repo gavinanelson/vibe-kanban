@@ -43,6 +43,9 @@ export interface ImplicationAutopilotPanelStatus {
   defaultModel: string;
   defaultReasoning: string;
   daemonized: boolean;
+  workflowState: string;
+  workflowStateReason: string;
+  duplicatePreventionKey: string;
 }
 
 const NEXT_ACTION_DISPLAY: Record<
@@ -168,6 +171,10 @@ export function buildImplicationAutopilotPanelStatus(
       defaultModel: 'gpt-5.5',
       defaultReasoning: 'medium',
       daemonized: false,
+      workflowState: 'Queued',
+      workflowStateReason:
+        'Queued until a local workspace is linked to the issue.',
+      duplicatePreventionKey: 'no-workspace',
     };
   }
 
@@ -187,6 +194,7 @@ export function buildImplicationAutopilotPanelStatus(
     status.auto_review_state
   );
   const prMergeState = formatImplicationAutopilotValue(status.pr_merge_state);
+  const workflowState = formatImplicationAutopilotValue(status.workflow_state);
   const hasCompletedReviewFix = status.review_fix_state === 'completed';
   const currentStepLabel = currentStepLabelFor(status.next_action, status);
   const nextActionDescription =
@@ -212,6 +220,9 @@ export function buildImplicationAutopilotPanelStatus(
     defaultModel: status.default_model,
     defaultReasoning: status.default_reasoning,
     daemonized: status.daemonized,
+    workflowState,
+    workflowStateReason: status.workflow_state_reason,
+    duplicatePreventionKey: status.duplicate_prevention_key,
   };
 }
 

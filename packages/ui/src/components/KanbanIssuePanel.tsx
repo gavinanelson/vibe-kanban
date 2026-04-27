@@ -96,6 +96,9 @@ export interface ImplicationAutopilotPanelStatus {
   defaultModel: string;
   defaultReasoning: string;
   daemonized: boolean;
+  workflowState: string;
+  workflowStateReason: string;
+  duplicatePreventionKey: string;
 }
 
 export interface LinkedGitHubIssue {
@@ -158,6 +161,8 @@ export interface KanbanIssuePanelProps {
   implicationAutopilotStatus?: ImplicationAutopilotPanelStatus | null;
   isImplicationAutopilotLoading?: boolean;
   onRefreshImplicationAutopilot?: () => void;
+  onAdvanceImplicationAutopilot?: () => void;
+  isAdvancingImplicationAutopilot?: boolean;
   onStartImplicationAutoReview?: () => void;
   isStartingImplicationAutoReview?: boolean;
   onStartImplicationReviewFix?: () => void;
@@ -331,6 +336,8 @@ export function KanbanIssuePanel({
   implicationAutopilotStatus,
   isImplicationAutopilotLoading,
   onRefreshImplicationAutopilot,
+  onAdvanceImplicationAutopilot,
+  isAdvancingImplicationAutopilot,
   onStartImplicationAutoReview,
   isStartingImplicationAutoReview,
   onStartImplicationReviewFix,
@@ -606,6 +613,11 @@ export function KanbanIssuePanel({
                           status slice
                         </span>
                       )}
+                      {implicationAutopilotStatus?.daemonized === true && (
+                        <span className="rounded-sm bg-success/10 px-half py-0.5 text-[10px] uppercase tracking-normal text-success">
+                          app advance
+                        </span>
+                      )}
                     </div>
                     <p className="mt-half text-xs text-low">
                       {implicationAutopilotStatus?.nextActionDescription ??
@@ -630,6 +642,23 @@ export function KanbanIssuePanel({
                         />
                       </button>
                     )}
+                    {onAdvanceImplicationAutopilot &&
+                      implicationAutopilotStatus?.nextAction !==
+                        'ready_for_merge' &&
+                      implicationAutopilotStatus?.nextAction !== 'done' &&
+                      implicationAutopilotStatus?.nextAction !==
+                        'investigate_failure' && (
+                        <button
+                          type="button"
+                          onClick={onAdvanceImplicationAutopilot}
+                          disabled={isAdvancingImplicationAutopilot}
+                          className="inline-flex items-center gap-half rounded-sm bg-brand px-half py-half text-xs text-on-brand hover:bg-brand-hover disabled:opacity-50"
+                          title="Let the app advance the next safe autopilot step for this workspace."
+                        >
+                          <PlayIcon className="size-icon-xs" weight="bold" />
+                          Advance
+                        </button>
+                      )}
                     {onStartImplicationAutoReview &&
                       implicationAutopilotStatus?.nextAction ===
                         'start_auto_review' && (
@@ -699,6 +728,18 @@ export function KanbanIssuePanel({
 
                     <div className="rounded-sm border border-border bg-panel/50 px-half py-half">
                       <div className="flex flex-wrap items-center gap-half text-xs">
+                        <span className="font-medium text-high">App state</span>
+                        <span className="text-low">
+                          {implicationAutopilotStatus.workflowState}
+                        </span>
+                      </div>
+                      <p className="mt-half text-xs text-low">
+                        {implicationAutopilotStatus.workflowStateReason}
+                      </p>
+                    </div>
+
+                    <div className="rounded-sm border border-border bg-panel/50 px-half py-half">
+                      <div className="flex flex-wrap items-center gap-half text-xs">
                         <span className="font-medium text-high">
                           Review decision
                         </span>
@@ -736,6 +777,9 @@ export function KanbanIssuePanel({
                         {implicationAutopilotStatus.defaultReasoning} reasoning.
                         Completed sessions with unseen output are idle; only
                         running sessions are spending tokens.
+                      </span>
+                      <span className="block truncate pt-0.5 font-ibm-plex-mono text-[11px] text-low">
+                        {implicationAutopilotStatus.duplicatePreventionKey}
                       </span>
                     </div>
                   </>

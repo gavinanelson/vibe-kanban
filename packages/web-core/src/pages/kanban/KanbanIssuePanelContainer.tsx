@@ -345,6 +345,22 @@ export function KanbanIssuePanelContainer({
     },
   });
 
+  const advanceAutopilotMutation = useMutation({
+    mutationFn: () =>
+      implicationAutopilotApi.advance(
+        selectedIssueLocalWorkspaceId!,
+        effectiveHostId
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: autopilotQueryKey });
+      if (selectedIssueLocalWorkspaceId) {
+        queryClient.invalidateQueries({
+          queryKey: ['processes', selectedIssueLocalWorkspaceId],
+        });
+      }
+    },
+  });
+
   const startReviewFixMutation = useMutation({
     mutationFn: () =>
       implicationAutopilotApi.startReviewFix(
@@ -1342,6 +1358,14 @@ export function KanbanIssuePanelContainer({
           ? () => void autopilotStatusQuery.refetch()
           : undefined
       }
+      onAdvanceImplicationAutopilot={
+        shouldShowImplicationAutopilot &&
+        selectedIssueLocalWorkspaceId &&
+        implicationAutopilotPanelStatus?.daemonized
+          ? () => advanceAutopilotMutation.mutate()
+          : undefined
+      }
+      isAdvancingImplicationAutopilot={advanceAutopilotMutation.isPending}
       onStartImplicationAutoReview={
         shouldShowImplicationAutopilot &&
         selectedIssueLocalWorkspaceId &&
