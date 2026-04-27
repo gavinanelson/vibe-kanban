@@ -1,5 +1,11 @@
-use std::{future::Future, path::PathBuf};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
 
+use api_types::{Issue, UpdateIssueRequest};
 use axum::{
     Extension, Json, Router,
     extract::State,
@@ -25,7 +31,7 @@ use executors::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use services::services::container::ContainerService;
+use services::services::{container::ContainerService, remote_client::RemoteClient};
 use sqlx::FromRow;
 use ts_rs::TS;
 use utils::{log_msg::LogMsg, response::ApiResponse};
@@ -37,6 +43,12 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 const DEFAULT_CODEX_REASONING: &str = "medium";
 const REVIEW_PROMPT: &str = "Review this workspace as an independent Codex reviewer. Do not implement changes. Check the linked GitHub issue acceptance criteria, PR/diff scope, validation evidence, and hygiene. Return one of exactly `Decision: pass` or `Decision: request changes`, followed by blockers, non-blocking notes, validation evidence, and recommended next action.";
 const REVIEW_FIX_PROMPT: &str = "Continue the existing implementation by fixing only the blocking issues from the latest auto-review. Use Codex gpt-5.5 with medium reasoning. Keep the change bounded, preserve unrelated dirty work, run focused validation, and do not merge or claim the PR is merged. End with files changed, validation, and whether another auto-review is needed.";
+
+static ADVANCE_LOCKS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+
+fn default_batch_max_active() -> usize {
+    3
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +75,23 @@ pub enum AutopilotNextAction {
     MergeWait,
     Done,
     InvestigateFailure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AutopilotWorkflowState {
+    Queued,
+    BlockedByDependencies,
+    ImplementationRunning,
+    ReviewRunning,
+    ReviewPassed,
+    ReviewRequestedChanges,
+    ReviewFixRunning,
+    MergeWaiting,
+    Done,
+    Blocked,
+    ReadyToAdvance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -104,8 +133,95 @@ pub struct ImplicationAutopilotStatus {
     pub default_model: String,
     pub default_reasoning: String,
     pub daemonized: bool,
+    pub workflow_state: AutopilotWorkflowState,
+    pub workflow_state_reason: String,
+    pub duplicate_prevention_key: String,
     pub token_safety_state: AutopilotTokenSafetyState,
     pub token_safety_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ImplicationAutopilotAdvanceResponse {
+    pub action_taken: AutopilotAdvanceAction,
+    pub status: ImplicationAutopilotStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AutopilotAdvanceAction {
+    Noop,
+    PromotedToReview,
+    StartedAutoReview,
+    StartedReviewFix,
+    MergeHandoff,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BatchCardQueueState {
+    Queued,
+    BlockedByDependencies,
+    Runnable,
+    Active,
+    Done,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BatchAdvanceCard {
+    pub issue_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub state: BatchCardQueueState,
+    pub blockers: Vec<Uuid>,
+    pub action: Option<AutopilotNextAction>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BatchAdvancePlan {
+    pub max_active: usize,
+    pub active_count: usize,
+    pub cards: Vec<BatchAdvanceCard>,
+}
+
+#[derive(Debug, Clone)]
+struct BatchCandidate {
+    issue_id: Uuid,
+    workspace_id: Option<Uuid>,
+    done: bool,
+    active: bool,
+    next_action: Option<AutopilotNextAction>,
+    blockers: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BatchAdvancePlanRequest {
+    #[serde(default = "default_batch_max_active")]
+    pub max_active: usize,
+    pub cards: Vec<BatchAdvancePlanCandidate>,
+    #[serde(default)]
+    pub relationships: Vec<BatchAdvanceRelationship>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BatchAdvanceRelationship {
+    pub issue_id: Uuid,
+    pub blocking_issue_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct BatchAdvancePlanCandidate {
+    pub issue_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub active: bool,
+    pub next_action: Option<AutopilotNextAction>,
+    #[serde(default)]
+    pub blockers: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -133,10 +249,14 @@ struct ProcessRow {
 }
 
 pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
-    Router::new()
+    let workspace_routes = Router::new()
         .route(
             "/workspaces/{id}/implication-autopilot/status",
             get(get_status),
+        )
+        .route(
+            "/workspaces/{id}/implication-autopilot/advance",
+            post(advance_workspace),
         )
         .route(
             "/workspaces/{id}/implication-autopilot/review",
@@ -149,7 +269,11 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .layer(axum::middleware::from_fn_with_state(
             deployment.clone(),
             load_workspace_middleware,
-        ))
+        ));
+
+    Router::new()
+        .route("/implication-autopilot/batch/plan", post(plan_batch))
+        .merge(workspace_routes)
 }
 
 #[axum::debug_handler]
@@ -162,13 +286,72 @@ async fn get_status(
 }
 
 #[axum::debug_handler]
+async fn plan_batch(
+    Json(payload): Json<BatchAdvancePlanRequest>,
+) -> Result<Json<ApiResponse<BatchAdvancePlan>>, ApiError> {
+    let candidates = payload
+        .cards
+        .into_iter()
+        .map(|card| BatchCandidate {
+            issue_id: card.issue_id,
+            workspace_id: card.workspace_id,
+            done: card.done,
+            active: card.active,
+            next_action: card.next_action,
+            blockers: card.blockers,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(ApiResponse::success(plan_batch_advance(
+        &candidates,
+        &payload.relationships,
+        payload.max_active,
+    ))))
+}
+
+#[axum::debug_handler]
+async fn advance_workspace(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+) -> Result<Json<ApiResponse<ImplicationAutopilotAdvanceResponse>>, ApiError> {
+    ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
+
+    let action_taken = advance_workspace_once(&deployment, &workspace).await?;
+    let status = build_status(&deployment, &workspace).await?;
+    Ok(Json(ApiResponse::success(
+        ImplicationAutopilotAdvanceResponse {
+            action_taken,
+            status,
+        },
+    )))
+}
+
+#[axum::debug_handler]
 async fn start_auto_review(
     Extension(workspace): Extension<Workspace>,
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<StartAutopilotReviewRequest>,
 ) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
     ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
+    let process = start_auto_review_for_workspace(&deployment, &workspace, payload.rerun).await?;
+    Ok(Json(ApiResponse::success(process)))
+}
 
+#[axum::debug_handler]
+async fn start_review_fix(
+    Extension(workspace): Extension<Workspace>,
+    State(deployment): State<DeploymentImpl>,
+    Json(_payload): Json<StartAutopilotReviewFixRequest>,
+) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
+    ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
+    let process = start_review_fix_for_workspace(&deployment, &workspace).await?;
+    Ok(Json(ApiResponse::success(process)))
+}
+
+async fn start_auto_review_for_workspace(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    rerun: bool,
+) -> Result<AutopilotProcessSummary, ApiError> {
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
         workspace.id,
@@ -189,17 +372,18 @@ async fn start_auto_review(
     let review_fix_process = rows
         .iter()
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
-    let (latest_review_decision, _, _) =
-        decide_from_review_attempts(&deployment, &review_processes).await;
-    let pr_merge_state = infer_pr_merge_state(&workspace, &latest_review_decision);
+    let (latest_review_decision, _, latest_review_process) =
+        decide_from_review_attempts(deployment, &review_processes).await;
+    let pr_merge_state = infer_pr_merge_state(workspace, &latest_review_decision);
 
     if let Err(message) = auto_review_start_gate(
-        &workspace,
+        workspace,
         implementation_process,
         &latest_review_decision,
+        latest_review_process,
         review_fix_process,
         &pr_merge_state,
-        payload.rerun,
+        rerun,
     ) {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
             message,
@@ -210,7 +394,7 @@ async fn start_auto_review(
         &deployment.db().pool,
         &CreateSession {
             executor: Some("CODEX".to_string()),
-            name: Some(auto_review_session_name(payload.rerun)),
+            name: Some(auto_review_session_name(rerun)),
         },
         Uuid::new_v4(),
         workspace.id,
@@ -219,10 +403,10 @@ async fn start_auto_review(
 
     let container_ref = deployment
         .container()
-        .ensure_container_exists(&workspace)
+        .ensure_container_exists(workspace)
         .await?;
     let context =
-        build_autopilot_review_context(&deployment, &workspace, container_ref.as_str()).await?;
+        build_autopilot_review_context(deployment, workspace, container_ref.as_str()).await?;
     let executor_config = default_codex_config();
     let prompt = build_review_prompt(context.as_deref(), Some(REVIEW_PROMPT));
     let action = ExecutorAction::new(
@@ -238,35 +422,31 @@ async fn start_auto_review(
     let process = deployment
         .container()
         .start_execution(
-            &workspace,
+            workspace,
             &session,
             &action,
             &ExecutionProcessRunReason::CodingAgent,
         )
         .await?;
 
-    Ok(Json(ApiResponse::success(AutopilotProcessSummary {
-        id: process.id,
-        session_id: process.session_id,
-        session_name: session.name,
-        status: process.status,
-        run_reason: process.run_reason,
-        exit_code: process.exit_code,
-        started_at: process.started_at.to_rfc3339(),
-        completed_at: process
+    Ok(process_summary_from_parts(
+        process.id,
+        process.session_id,
+        session.name,
+        process.status,
+        process.run_reason,
+        process.exit_code,
+        process.started_at.to_rfc3339(),
+        process
             .completed_at
             .map(|dt: DateTime<Utc>| dt.to_rfc3339()),
-    })))
+    ))
 }
 
-#[axum::debug_handler]
-async fn start_review_fix(
-    Extension(workspace): Extension<Workspace>,
-    State(deployment): State<DeploymentImpl>,
-    Json(_payload): Json<StartAutopilotReviewFixRequest>,
-) -> Result<Json<ApiResponse<AutopilotProcessSummary>>, ApiError> {
-    ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
-
+async fn start_review_fix_for_workspace(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Result<AutopilotProcessSummary, ApiError> {
     if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_workspace(
         &deployment.db().pool,
         workspace.id,
@@ -287,13 +467,14 @@ async fn start_review_fix(
     let review_fix_process = rows
         .iter()
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
-    let (latest_review_decision, latest_review_excerpt, _) =
-        decide_from_review_attempts(&deployment, &review_processes).await;
+    let (latest_review_decision, latest_review_excerpt, latest_review_process) =
+        decide_from_review_attempts(deployment, &review_processes).await;
 
     if let Err(message) = review_fix_start_gate(
-        &workspace,
+        workspace,
         implementation_process,
         &latest_review_decision,
+        latest_review_process,
         review_fix_process,
     ) {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
@@ -314,7 +495,7 @@ async fn start_review_fix(
 
     deployment
         .container()
-        .ensure_container_exists(&workspace)
+        .ensure_container_exists(workspace)
         .await?;
 
     let prompt = match latest_review_excerpt {
@@ -337,25 +518,92 @@ async fn start_review_fix(
     let process = deployment
         .container()
         .start_execution(
-            &workspace,
+            workspace,
             &session,
             &action,
             &ExecutionProcessRunReason::CodingAgent,
         )
         .await?;
 
-    Ok(Json(ApiResponse::success(AutopilotProcessSummary {
-        id: process.id,
-        session_id: process.session_id,
-        session_name: session.name,
-        status: process.status,
-        run_reason: process.run_reason,
-        exit_code: process.exit_code,
-        started_at: process.started_at.to_rfc3339(),
-        completed_at: process
+    Ok(process_summary_from_parts(
+        process.id,
+        process.session_id,
+        session.name,
+        process.status,
+        process.run_reason,
+        process.exit_code,
+        process.started_at.to_rfc3339(),
+        process
             .completed_at
             .map(|dt: DateTime<Utc>| dt.to_rfc3339()),
-    })))
+    ))
+}
+
+async fn advance_workspace_once(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Result<AutopilotAdvanceAction, ApiError> {
+    let Some(_advance_guard) = WorkspaceAdvanceGuard::try_acquire(workspace.id) else {
+        return Ok(AutopilotAdvanceAction::Noop);
+    };
+
+    let client = deployment.remote_client()?;
+    let remote_workspace = client.get_workspace_by_local_id(workspace.id).await?;
+    let issue = match remote_workspace.issue_id {
+        Some(issue_id) => Some(client.get_issue(issue_id).await?),
+        None => None,
+    };
+
+    let status = build_status(deployment, workspace).await?;
+    match status.next_action {
+        AutopilotNextAction::StartAutoReview => {
+            let rerun = status.next_action == AutopilotNextAction::StartAutoReview
+                && status.latest_review_decision == AutopilotDecision::RequestChanges;
+            start_auto_review_for_workspace(deployment, workspace, rerun).await?;
+            if let Some(issue) = issue.as_ref() {
+                promote_issue_to_in_review(&client, issue).await?;
+            }
+            Ok(AutopilotAdvanceAction::StartedAutoReview)
+        }
+        AutopilotNextAction::StartReviewFix => {
+            start_review_fix_for_workspace(deployment, workspace).await?;
+            Ok(AutopilotAdvanceAction::StartedReviewFix)
+        }
+        AutopilotNextAction::ReadyForMerge => Ok(AutopilotAdvanceAction::MergeHandoff),
+        AutopilotNextAction::WaitForImplementation => Ok(AutopilotAdvanceAction::Noop),
+        AutopilotNextAction::NoWorkspace | AutopilotNextAction::InvestigateFailure => {
+            Ok(AutopilotAdvanceAction::Blocked)
+        }
+        AutopilotNextAction::WaitForAutoReview
+        | AutopilotNextAction::WaitForReviewFix
+        | AutopilotNextAction::MergeWait
+        | AutopilotNextAction::Done => Ok(AutopilotAdvanceAction::Noop),
+    }
+}
+
+struct WorkspaceAdvanceGuard {
+    workspace_id: Uuid,
+}
+
+impl WorkspaceAdvanceGuard {
+    fn try_acquire(workspace_id: Uuid) -> Option<Self> {
+        let locks = ADVANCE_LOCKS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut active = locks.lock().ok()?;
+        if !active.insert(workspace_id) {
+            return None;
+        }
+        Some(Self { workspace_id })
+    }
+}
+
+impl Drop for WorkspaceAdvanceGuard {
+    fn drop(&mut self) {
+        if let Some(locks) = ADVANCE_LOCKS.get()
+            && let Ok(mut active) = locks.lock()
+        {
+            active.remove(&self.workspace_id);
+        }
+    }
 }
 
 async fn build_autopilot_review_context(
@@ -446,6 +694,44 @@ fn default_codex_config() -> ExecutorConfig {
     }
 }
 
+async fn promote_issue_to_in_review(
+    client: &RemoteClient,
+    issue: &Issue,
+) -> Result<bool, ApiError> {
+    let statuses = client.list_project_statuses(issue.project_id).await?;
+    let Some(in_review) = statuses
+        .project_statuses
+        .iter()
+        .find(|status| status.name.trim().eq_ignore_ascii_case("in review"))
+    else {
+        return Ok(false);
+    };
+
+    if issue.status_id == in_review.id {
+        return Ok(false);
+    }
+
+    client
+        .update_issue(
+            issue.id,
+            &UpdateIssueRequest {
+                status_id: Some(in_review.id),
+                title: None,
+                description: None,
+                priority: None,
+                start_date: None,
+                target_date: None,
+                completed_at: None,
+                sort_order: None,
+                parent_issue_id: None,
+                parent_issue_sort_order: None,
+                extension_metadata: None,
+            },
+        )
+        .await?;
+    Ok(true)
+}
+
 async fn build_status(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
@@ -477,6 +763,7 @@ async fn build_status(
         workspace,
         implementation_process,
         &latest_review_decision,
+        auto_review_process,
         review_fix_process,
         &pr_merge_state,
     );
@@ -488,13 +775,22 @@ async fn build_status(
         review_fix_process,
         &latest_review_decision,
     );
+    let (workflow_state, workflow_state_reason) = workflow_state(
+        &next_action,
+        blocker.as_deref(),
+        implementation_process,
+        &latest_review_decision,
+        auto_review_process,
+        review_fix_process,
+        &pr_merge_state,
+    );
 
     Ok(ImplicationAutopilotStatus {
         workspace_id: workspace.id,
         workspace_name: workspace.name.clone(),
         implementation_state,
         auto_review_state,
-        latest_review_decision,
+        latest_review_decision: latest_review_decision.clone(),
         latest_review_excerpt,
         review_fix_state,
         pr_merge_state,
@@ -505,7 +801,16 @@ async fn build_status(
         review_fix_process: review_fix_process.map(process_summary),
         default_model: DEFAULT_CODEX_MODEL.to_string(),
         default_reasoning: DEFAULT_CODEX_REASONING.to_string(),
-        daemonized: false,
+        daemonized: true,
+        workflow_state,
+        workflow_state_reason,
+        duplicate_prevention_key: duplicate_prevention_key(
+            workspace,
+            implementation_process,
+            auto_review_process,
+            review_fix_process,
+            &latest_review_decision,
+        ),
         token_safety_state,
         token_safety_note,
     })
@@ -536,15 +841,37 @@ async fn list_processes(
 }
 
 fn process_summary(row: &ProcessRow) -> AutopilotProcessSummary {
+    process_summary_from_parts(
+        row.id,
+        row.session_id,
+        row.session_name.clone(),
+        row.status.clone(),
+        row.run_reason.clone(),
+        row.exit_code,
+        row.started_at.clone(),
+        row.completed_at.clone(),
+    )
+}
+
+fn process_summary_from_parts(
+    id: Uuid,
+    session_id: Uuid,
+    session_name: Option<String>,
+    status: ExecutionProcessStatus,
+    run_reason: ExecutionProcessRunReason,
+    exit_code: Option<i64>,
+    started_at: String,
+    completed_at: Option<String>,
+) -> AutopilotProcessSummary {
     AutopilotProcessSummary {
-        id: row.id,
-        session_id: row.session_id,
-        session_name: row.session_name.clone(),
-        status: row.status.clone(),
-        run_reason: row.run_reason.clone(),
-        exit_code: row.exit_code,
-        started_at: row.started_at.clone(),
-        completed_at: row.completed_at.clone(),
+        id,
+        session_id,
+        session_name,
+        status,
+        run_reason,
+        exit_code,
+        started_at,
+        completed_at,
     }
 }
 
@@ -869,6 +1196,7 @@ fn review_fix_start_gate(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
 ) -> Result<(), String> {
     if workspace.archived || workspace.worktree_deleted {
@@ -892,8 +1220,17 @@ fn review_fix_start_gate(
         if row.status == ExecutionProcessStatus::Running {
             return Err("Review fix is already running.".to_string());
         }
-        if row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0) {
-            return Err("Review fix already completed; rerun auto-review next.".to_string());
+        if review_fix_completed_after_review(row, latest_review) {
+            return Err(
+                "Review fix already completed after the latest review; rerun auto-review next."
+                    .to_string(),
+            );
+        }
+        if review_fix_attempted_after_review(row, latest_review) {
+            return Err(
+                "Review fix already ran after the latest review and did not complete cleanly."
+                    .to_string(),
+            );
         }
     }
     Ok(())
@@ -903,6 +1240,7 @@ fn auto_review_start_gate(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
     rerun: bool,
@@ -911,6 +1249,7 @@ fn auto_review_start_gate(
         workspace,
         implementation,
         decision,
+        latest_review,
         review_fix,
         pr_merge_state,
     );
@@ -923,9 +1262,8 @@ fn auto_review_start_gate(
     }
 
     if decision == &AutopilotDecision::RequestChanges {
-        let review_fix_completed = review_fix.is_some_and(|row| {
-            row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0)
-        });
+        let review_fix_completed =
+            review_fix.is_some_and(|row| review_fix_completed_after_review(row, latest_review));
         if review_fix_completed && !rerun {
             return Err(
                 "Auto-review rerun must be explicit after review fix completes.".to_string(),
@@ -1011,10 +1349,141 @@ fn token_safety(
     )
 }
 
+fn workflow_state(
+    next_action: &AutopilotNextAction,
+    blocker: Option<&str>,
+    _implementation: Option<&ProcessRow>,
+    decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
+    review_fix: Option<&ProcessRow>,
+    _pr_merge_state: &str,
+) -> (AutopilotWorkflowState, String) {
+    match next_action {
+        AutopilotNextAction::NoWorkspace => (
+            AutopilotWorkflowState::Queued,
+            blocker
+                .unwrap_or("Queued until a local workspace is linked.")
+                .to_string(),
+        ),
+        AutopilotNextAction::WaitForImplementation => (
+            AutopilotWorkflowState::ImplementationRunning,
+            "Implementation session is running; no duplicate workspace or review will start."
+                .to_string(),
+        ),
+        AutopilotNextAction::StartAutoReview => {
+            if decision == &AutopilotDecision::RequestChanges
+                && review_fix
+                    .is_some_and(|row| review_fix_completed_after_review(row, latest_review))
+            {
+                (
+                    AutopilotWorkflowState::ReadyToAdvance,
+                    "Review fix completed; app advance may start exactly one re-review."
+                        .to_string(),
+                )
+            } else {
+                (
+                    AutopilotWorkflowState::ReadyToAdvance,
+                    "Implementation completed; app advance may promote to In review and start exactly one auto-review.".to_string(),
+                )
+            }
+        }
+        AutopilotNextAction::WaitForAutoReview => (
+            AutopilotWorkflowState::ReviewRunning,
+            "One auto-review is already running for this workspace state.".to_string(),
+        ),
+        AutopilotNextAction::StartReviewFix => (
+            AutopilotWorkflowState::ReviewRequestedChanges,
+            "Latest review requested changes; app advance may start exactly one review-fix session."
+                .to_string(),
+        ),
+        AutopilotNextAction::WaitForReviewFix => (
+            AutopilotWorkflowState::ReviewFixRunning,
+            "One review-fix session is already running.".to_string(),
+        ),
+        AutopilotNextAction::ReadyForMerge => (
+            AutopilotWorkflowState::ReviewPassed,
+            blocker
+                .unwrap_or("Review passed; merge handoff is visible.")
+                .to_string(),
+        ),
+        AutopilotNextAction::MergeWait => (
+            AutopilotWorkflowState::MergeWaiting,
+            "Merge/check work is waiting.".to_string(),
+        ),
+        AutopilotNextAction::Done => (
+            AutopilotWorkflowState::Done,
+            "Workspace is done or archived.".to_string(),
+        ),
+        AutopilotNextAction::InvestigateFailure => (
+            AutopilotWorkflowState::Blocked,
+            blocker
+                .unwrap_or("Autopilot is blocked before another Codex session can start.")
+                .to_string(),
+        ),
+    }
+}
+
+fn duplicate_prevention_key(
+    workspace: &Workspace,
+    implementation: Option<&ProcessRow>,
+    auto_review: Option<&ProcessRow>,
+    review_fix: Option<&ProcessRow>,
+    decision: &AutopilotDecision,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{:?}",
+        workspace.id,
+        implementation
+            .map(|row| row.id.to_string())
+            .unwrap_or_else(|| "no-implementation".to_string()),
+        auto_review
+            .map(|row| row.id.to_string())
+            .unwrap_or_else(|| "no-review".to_string()),
+        review_fix
+            .map(|row| row.id.to_string())
+            .unwrap_or_else(|| "no-review-fix".to_string()),
+        decision
+    )
+}
+
+fn review_fix_completed_after_review(
+    review_fix: &ProcessRow,
+    latest_review: Option<&ProcessRow>,
+) -> bool {
+    review_fix.status == ExecutionProcessStatus::Completed
+        && review_fix.exit_code == Some(0)
+        && review_fix_attempted_after_review(review_fix, latest_review)
+}
+
+fn review_fix_attempted_after_review(
+    review_fix: &ProcessRow,
+    latest_review: Option<&ProcessRow>,
+) -> bool {
+    let Some(latest_review) = latest_review else {
+        return false;
+    };
+
+    process_time_after(&review_fix.started_at, review_reference_time(latest_review))
+}
+
+fn review_reference_time(review: &ProcessRow) -> &str {
+    review.completed_at.as_deref().unwrap_or(&review.started_at)
+}
+
+fn process_time_after(candidate: &str, reference: &str) -> bool {
+    let candidate_time = DateTime::parse_from_rfc3339(candidate);
+    let reference_time = DateTime::parse_from_rfc3339(reference);
+    match (candidate_time, reference_time) {
+        (Ok(candidate_time), Ok(reference_time)) => candidate_time > reference_time,
+        _ => candidate > reference,
+    }
+}
+
 fn next_action(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
     decision: &AutopilotDecision,
+    latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
 ) -> (AutopilotNextAction, Option<String>) {
@@ -1051,14 +1520,14 @@ fn next_action(
             Some(row) if row.status == ExecutionProcessStatus::Running => {
                 (AutopilotNextAction::WaitForReviewFix, None)
             }
-            Some(row)
-                if row.status == ExecutionProcessStatus::Completed && row.exit_code == Some(0) =>
-            {
-                (
-                    AutopilotNextAction::StartAutoReview,
-                    Some("Review fix completed; rerun auto-review.".to_string()),
-                )
-            }
+            Some(row) if review_fix_completed_after_review(row, latest_review) => (
+                AutopilotNextAction::StartAutoReview,
+                Some("Review fix completed; rerun auto-review.".to_string()),
+            ),
+            Some(row) if review_fix_attempted_after_review(row, latest_review) => (
+                AutopilotNextAction::InvestigateFailure,
+                Some("Review fix did not complete cleanly.".to_string()),
+            ),
             _ => (AutopilotNextAction::StartReviewFix, None),
         },
         // TODO(implication-autopilot): wire a safe PR merge helper here when the
@@ -1072,6 +1541,122 @@ fn next_action(
                     .to_string(),
             ),
         ),
+    }
+}
+
+fn dependency_blockers_for(
+    issue_id: Uuid,
+    done_issue_ids: &HashSet<Uuid>,
+    relationships: &[BatchAdvanceRelationship],
+) -> Vec<Uuid> {
+    relationships
+        .iter()
+        .filter(|relationship| {
+            relationship.issue_id == issue_id
+                && !done_issue_ids.contains(&relationship.blocking_issue_id)
+        })
+        .map(|relationship| relationship.blocking_issue_id)
+        .collect()
+}
+
+fn plan_batch_advance(
+    candidates: &[BatchCandidate],
+    relationships: &[BatchAdvanceRelationship],
+    max_active: usize,
+) -> BatchAdvancePlan {
+    let done_issue_ids = candidates
+        .iter()
+        .filter(|candidate| candidate.done)
+        .map(|candidate| candidate.issue_id)
+        .collect::<HashSet<_>>();
+    let mut active_count = candidates
+        .iter()
+        .filter(|candidate| candidate.active)
+        .count();
+    let max_active = max_active.max(1);
+
+    let cards = candidates
+        .iter()
+        .map(|candidate| {
+            let blockers = candidate
+                .blockers
+                .iter()
+                .copied()
+                .filter(|blocker| !done_issue_ids.contains(blocker))
+                .chain(dependency_blockers_for(
+                    candidate.issue_id,
+                    &done_issue_ids,
+                    relationships,
+                ))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            if candidate.done {
+                return BatchAdvanceCard {
+                    issue_id: candidate.issue_id,
+                    workspace_id: candidate.workspace_id,
+                    state: BatchCardQueueState::Done,
+                    blockers,
+                    action: None,
+                    reason: "Card is already done.".to_string(),
+                };
+            }
+
+            if candidate.active {
+                return BatchAdvanceCard {
+                    issue_id: candidate.issue_id,
+                    workspace_id: candidate.workspace_id,
+                    state: BatchCardQueueState::Active,
+                    blockers,
+                    action: candidate.next_action.clone(),
+                    reason: "Card already has active implementation, review, fix, or merge work."
+                        .to_string(),
+                };
+            }
+
+            if !blockers.is_empty() {
+                return BatchAdvanceCard {
+                    issue_id: candidate.issue_id,
+                    workspace_id: candidate.workspace_id,
+                    state: BatchCardQueueState::BlockedByDependencies,
+                    blockers,
+                    action: None,
+                    reason: "Card is staged, but dependency blockers must finish before it starts."
+                        .to_string(),
+                };
+            }
+
+            if active_count >= max_active {
+                return BatchAdvanceCard {
+                    issue_id: candidate.issue_id,
+                    workspace_id: candidate.workspace_id,
+                    state: BatchCardQueueState::Queued,
+                    blockers,
+                    action: None,
+                    reason: "Card is staged and waiting for the active cap.".to_string(),
+                };
+            }
+
+            active_count += 1;
+            BatchAdvanceCard {
+                issue_id: candidate.issue_id,
+                workspace_id: candidate.workspace_id,
+                state: BatchCardQueueState::Runnable,
+                blockers,
+                action: candidate.next_action.clone(),
+                reason: "Card is staged and dependency-unblocked under the active cap.".to_string(),
+            }
+        })
+        .collect();
+
+    BatchAdvancePlan {
+        max_active,
+        active_count: candidates
+            .iter()
+            .filter(|candidate| candidate.active)
+            .count(),
+        cards,
     }
 }
 
@@ -1111,6 +1696,44 @@ mod tests {
 
     fn completed_process(name: &str, exit_code: i64) -> ProcessRow {
         process(name, ExecutionProcessStatus::Completed, Some(exit_code))
+    }
+
+    fn completed_process_at(
+        name: &str,
+        exit_code: i64,
+        started_at: &str,
+        completed_at: &str,
+    ) -> ProcessRow {
+        ProcessRow {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_name: Some(name.to_string()),
+            status: ExecutionProcessStatus::Completed,
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+            exit_code: Some(exit_code),
+            started_at: started_at.to_string(),
+            completed_at: Some(completed_at.to_string()),
+        }
+    }
+
+    fn failed_process_at(name: &str, started_at: &str, completed_at: &str) -> ProcessRow {
+        ProcessRow {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_name: Some(name.to_string()),
+            status: ExecutionProcessStatus::Failed,
+            run_reason: ExecutionProcessRunReason::CodingAgent,
+            exit_code: Some(1),
+            started_at: started_at.to_string(),
+            completed_at: Some(completed_at.to_string()),
+        }
+    }
+
+    fn relationship(issue_id: Uuid, blocker: Uuid) -> BatchAdvanceRelationship {
+        BatchAdvanceRelationship {
+            issue_id,
+            blocking_issue_id: blocker,
+        }
     }
 
     #[test]
@@ -1299,6 +1922,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                None,
                 None
             ),
             Ok(())
@@ -1315,6 +1939,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::Pass,
+                None,
                 None
             ),
             Err("Review fix can only start after auto-review requests changes.".to_string())
@@ -1343,6 +1968,7 @@ mod tests {
                 Some(&implementation),
                 &AutopilotDecision::Missing,
                 None,
+                None,
                 "waiting_for_review",
                 false,
             ),
@@ -1353,7 +1979,18 @@ mod tests {
     #[test]
     fn action_gating_requires_explicit_rerun_after_review_fix_completes() {
         let implementation = completed_process("Implementation", 0);
-        let review_fix = completed_process("Review fix", 0);
+        let review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let review_fix = completed_process_at(
+            "Review fix",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
         let workspace = workspace();
 
         assert_eq!(
@@ -1361,6 +1998,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
                 false,
@@ -1373,6 +2011,7 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
                 true,
@@ -1384,6 +2023,7 @@ mod tests {
     #[test]
     fn action_gating_blocks_auto_review_when_review_fix_is_next() {
         let implementation = completed_process("Implementation", 0);
+        let review = completed_process("Auto review - Codex (medium)", 0);
         let workspace = workspace();
 
         assert_eq!(
@@ -1391,11 +2031,131 @@ mod tests {
                 &workspace,
                 Some(&implementation),
                 &AutopilotDecision::RequestChanges,
+                Some(&review),
                 None,
                 "blocked_by_review",
                 false,
             ),
             Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_review_requires_a_newer_review_fix_before_re_review() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review rerun - Codex (medium)",
+            0,
+            "2026-04-25T12:40:00Z",
+            "2026-04-25T12:50:00Z",
+        );
+        let old_review_fix = completed_process_at(
+            "Review fix - Codex (medium)",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::RequestChanges,
+            Some(&latest_review),
+            Some(&old_review_fix),
+            "blocked_by_review",
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::StartReviewFix);
+        assert_eq!(blocker, None);
+        assert_eq!(
+            auto_review_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&old_review_fix),
+                "blocked_by_review",
+                true,
+            ),
+            Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
+        );
+    }
+
+    #[test]
+    fn review_fix_gate_blocks_duplicate_fix_after_latest_review() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let review_fix = completed_process_at(
+            "Review fix - Codex (medium)",
+            0,
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&review_fix),
+            ),
+            Err(
+                "Review fix already completed after the latest review; rerun auto-review next."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn failed_review_fix_after_latest_review_surfaces_blocker() {
+        let implementation = completed_process("Implementation", 0);
+        let latest_review = completed_process_at(
+            "Auto review - Codex (medium)",
+            0,
+            "2026-04-25T12:00:00Z",
+            "2026-04-25T12:10:00Z",
+        );
+        let failed_review_fix = failed_process_at(
+            "Review fix - Codex (medium)",
+            "2026-04-25T12:20:00Z",
+            "2026-04-25T12:30:00Z",
+        );
+        let workspace = workspace();
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::RequestChanges,
+            Some(&latest_review),
+            Some(&failed_review_fix),
+            "blocked_by_review",
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
+        assert_eq!(
+            blocker,
+            Some("Review fix did not complete cleanly.".to_string())
+        );
+        assert_eq!(
+            review_fix_start_gate(
+                &workspace,
+                Some(&implementation),
+                &AutopilotDecision::RequestChanges,
+                Some(&latest_review),
+                Some(&failed_review_fix),
+            ),
+            Err(
+                "Review fix already ran after the latest review and did not complete cleanly."
+                    .to_string()
+            )
         );
     }
 
@@ -1407,6 +2167,7 @@ mod tests {
             &workspace,
             Some(&implementation),
             &AutopilotDecision::Pass,
+            None,
             None,
             "review_passed_merge_status_unknown",
         );
@@ -1433,5 +2194,106 @@ mod tests {
         assert_eq!(state, AutopilotTokenSafetyState::Guarded);
         assert!(note.contains("explicit rerun"));
         assert!(note.contains("no agent is running"));
+    }
+
+    #[test]
+    fn workflow_state_marks_review_pass_as_merge_handoff_without_token_use() {
+        let implementation = completed_process("Implementation", 0);
+        let (state, reason) = workflow_state(
+            &AutopilotNextAction::ReadyForMerge,
+            Some("Review passed; merge handoff is visible."),
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            None,
+            "review_passed_merge_status_unknown",
+        );
+
+        assert_eq!(state, AutopilotWorkflowState::ReviewPassed);
+        assert!(reason.contains("merge handoff"));
+    }
+
+    #[test]
+    fn batch_selection_stages_all_cards_but_only_runnable_unblocked_cards_start() {
+        let blocker = Uuid::new_v4();
+        let blocked = Uuid::new_v4();
+        let runnable = Uuid::new_v4();
+        let queued_by_cap = Uuid::new_v4();
+        let candidates = vec![
+            BatchCandidate {
+                issue_id: blocker,
+                workspace_id: Some(Uuid::new_v4()),
+                done: false,
+                active: true,
+                next_action: Some(AutopilotNextAction::WaitForImplementation),
+                blockers: vec![],
+            },
+            BatchCandidate {
+                issue_id: blocked,
+                workspace_id: None,
+                done: false,
+                active: false,
+                next_action: None,
+                blockers: vec![],
+            },
+            BatchCandidate {
+                issue_id: runnable,
+                workspace_id: None,
+                done: false,
+                active: false,
+                next_action: None,
+                blockers: vec![],
+            },
+            BatchCandidate {
+                issue_id: queued_by_cap,
+                workspace_id: None,
+                done: false,
+                active: false,
+                next_action: None,
+                blockers: vec![],
+            },
+        ];
+
+        let plan = plan_batch_advance(&candidates, &[relationship(blocked, blocker)], 2);
+
+        assert_eq!(plan.cards.len(), 4);
+        assert_eq!(plan.cards[0].state, BatchCardQueueState::Active);
+        assert_eq!(
+            plan.cards[1].state,
+            BatchCardQueueState::BlockedByDependencies
+        );
+        assert_eq!(plan.cards[1].blockers, vec![blocker]);
+        assert_eq!(plan.cards[2].state, BatchCardQueueState::Runnable);
+        assert_eq!(plan.cards[3].state, BatchCardQueueState::Queued);
+    }
+
+    #[test]
+    fn batch_selection_unblocks_dependents_when_blocker_is_done() {
+        let blocker = Uuid::new_v4();
+        let dependent = Uuid::new_v4();
+        let candidates = vec![
+            BatchCandidate {
+                issue_id: blocker,
+                workspace_id: Some(Uuid::new_v4()),
+                done: true,
+                active: false,
+                next_action: None,
+                blockers: vec![],
+            },
+            BatchCandidate {
+                issue_id: dependent,
+                workspace_id: None,
+                done: false,
+                active: false,
+                next_action: None,
+                blockers: vec![],
+            },
+        ];
+
+        let plan = plan_batch_advance(&candidates, &[relationship(dependent, blocker)], 1);
+
+        assert_eq!(plan.cards[0].state, BatchCardQueueState::Done);
+        assert_eq!(plan.cards[1].state, BatchCardQueueState::Runnable);
+        assert!(plan.cards[1].blockers.is_empty());
     }
 }

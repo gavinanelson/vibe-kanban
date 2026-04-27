@@ -33,7 +33,12 @@ const baseStatus: ImplicationAutopilotStatus = {
   review_fix_process: null,
   default_model: 'gpt-5.5',
   default_reasoning: 'medium',
-  daemonized: false,
+  daemonized: true,
+  workflow_state: 'ready_to_advance',
+  workflow_state_reason:
+    'Implementation completed; app advance may promote to In review and start exactly one auto-review.',
+  duplicate_prevention_key:
+    'workspace:implementation:no-review:no-review-fix:Missing',
   token_safety_state: 'guarded',
   token_safety_note:
     'Auto-review reruns are guarded: the server only exposes review starts when no agent is running and reruns are explicit after a completed review-fix.',
@@ -163,6 +168,14 @@ describe('implication autopilot presentation', () => {
     );
     match(panel.nextActionDescription, /verify checks and mergeability/);
     match(panel.blocker ?? '', /not daemonized/);
+  });
+
+  it('surfaces app-owned workflow state and duplicate prevention key', () => {
+    const panel = buildImplicationAutopilotPanelStatus(baseStatus);
+
+    equal(panel.workflowState, 'Ready to advance');
+    match(panel.workflowStateReason, /exactly one auto-review/);
+    match(panel.duplicatePreventionKey, /implementation/);
   });
 
   it('surfaces dirty or conflicting PR blockers in the final blocker step', () => {

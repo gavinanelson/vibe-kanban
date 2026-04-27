@@ -208,6 +208,27 @@ export type ImplicationAutopilotTokenSafetyState =
   | 'guarded'
   | 'blocked';
 
+export type ImplicationAutopilotWorkflowState =
+  | 'queued'
+  | 'blocked_by_dependencies'
+  | 'implementation_running'
+  | 'review_running'
+  | 'review_passed'
+  | 'review_requested_changes'
+  | 'review_fix_running'
+  | 'merge_waiting'
+  | 'done'
+  | 'blocked'
+  | 'ready_to_advance';
+
+export type ImplicationAutopilotAdvanceAction =
+  | 'noop'
+  | 'promoted_to_review'
+  | 'started_auto_review'
+  | 'started_review_fix'
+  | 'merge_handoff'
+  | 'blocked';
+
 export interface ImplicationAutopilotProcessSummary {
   id: string;
   session_id: string;
@@ -245,8 +266,16 @@ export interface ImplicationAutopilotStatus {
   default_model: string;
   default_reasoning: string;
   daemonized: boolean;
+  workflow_state: ImplicationAutopilotWorkflowState;
+  workflow_state_reason: string;
+  duplicate_prevention_key: string;
   token_safety_state: ImplicationAutopilotTokenSafetyState;
   token_safety_note: string;
+}
+
+export interface ImplicationAutopilotAdvanceResponse {
+  action_taken: ImplicationAutopilotAdvanceAction;
+  status: ImplicationAutopilotStatus;
 }
 
 export type OrganizationBillingStatus =
@@ -1732,6 +1761,20 @@ export const implicationAutopilotApi = {
       }
     );
     return handleApiResponse<ImplicationAutopilotProcessSummary>(response);
+  },
+
+  advance: async (
+    workspaceId: string,
+    hostId?: string | null
+  ): Promise<ImplicationAutopilotAdvanceResponse> => {
+    const response = await makeHostAwareRequest(
+      `/api/workspaces/${workspaceId}/implication-autopilot/advance`,
+      hostId,
+      {
+        method: 'POST',
+      }
+    );
+    return handleApiResponse<ImplicationAutopilotAdvanceResponse>(response);
   },
 
   startReviewFix: async (
