@@ -326,7 +326,10 @@ async fn advance_workspace(
     ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
 
     let (action_taken, merge_blocker) = advance_workspace_once(&deployment, &workspace).await?;
-    let mut status = build_status(&deployment, &workspace).await?;
+    let status_workspace = Workspace::find_by_id(&deployment.db().pool, workspace.id)
+        .await?
+        .unwrap_or(workspace);
+    let mut status = build_status(&deployment, &status_workspace).await?;
     if let Some(blocker) = merge_blocker {
         status.blocker = Some(blocker.clone());
         status.next_action = AutopilotNextAction::InvestigateFailure;
