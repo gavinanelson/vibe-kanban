@@ -1576,21 +1576,35 @@ async fn infer_pr_merge_state(
     }
 
     let merges = Merge::find_by_workspace_id(&deployment.db().pool, workspace.id).await?;
-    let has_open_pr = merges.iter().any(
-        |merge| matches!(merge, Merge::Pr(pr) if matches!(pr.pr_info.status, MergeStatus::Open)),
-    );
-    let has_merged = merges.iter().any(|merge| match merge {
-        Merge::Direct(_) => true,
-        Merge::Pr(pr) => matches!(pr.pr_info.status, MergeStatus::Merged),
-    });
+    let pr_statuses = merges
+        .iter()
+        .filter_map(|merge| match merge {
+            Merge::Pr(pr) => Some(pr.pr_info.status.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
-    if has_open_pr {
+    if pr_statuses
+        .iter()
+        .any(|status| matches!(status, MergeStatus::Open))
+    {
         if workspace_has_dirty_or_conflicting_changes(deployment, workspace).await? {
             return Ok("blocked_by_dirty_worktree".to_string());
         }
         return Ok("pr_open_pending_merge".to_string());
     }
-    if has_merged {
+
+    if let Some(state) = merge_state_from_pr_completion(&pr_statuses) {
+        if state == "merged_pending_done"
+            && workspace.pinned
+            && linked_issue_is_done(deployment, workspace).await?
+        {
+            return Ok("done_or_archived".to_string());
+        }
+        return Ok(state.to_string());
+    }
+
+    if merges.iter().any(|merge| matches!(merge, Merge::Direct(_))) {
         if workspace.pinned && linked_issue_is_done(deployment, workspace).await? {
             return Ok("done_or_archived".to_string());
         }
@@ -1598,6 +1612,16 @@ async fn infer_pr_merge_state(
     }
 
     Ok("no_pr_merge_found".to_string())
+}
+
+fn merge_state_from_pr_completion(statuses: &[MergeStatus]) -> Option<&'static str> {
+    if statuses.is_empty() {
+        return None;
+    }
+    if linked_pr_merge_completion_blocker(statuses).is_none() {
+        return Some("merged_pending_done");
+    }
+    Some("blocked_by_pr_requirements")
 }
 
 async fn linked_issue_is_done(
@@ -2687,6 +2711,23 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn merge_state_requires_all_linked_pull_requests_merged_before_done() {
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Merged]),
+            Some("merged_pending_done")
+        );
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Closed]),
+            Some("blocked_by_pr_requirements")
+        );
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Unknown]),
+            Some("blocked_by_pr_requirements")
+        );
+        assert_eq!(merge_state_from_pr_completion(&[]), None);
     }
 
     #[test]
