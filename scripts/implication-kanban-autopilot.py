@@ -716,22 +716,25 @@ def pr_for_issue(number: int) -> dict[str, Any] | None:
 
 
 def ensure_pr(card: Card, *, allow_merged_issue_pr: bool = True) -> dict[str, Any] | None:
+    branch = None
+    if card.local_workspace_id:
+        con = sqlite3.connect(LOCAL_DB)
+        con.row_factory = sqlite3.Row
+        row = con.execute("select branch from workspaces where id=cast(? as blob)", (bytes.fromhex(card.local_workspace_id.replace('-', '')),)).fetchone()
+        if row:
+            branch = row["branch"]
+    if branch:
+        existing = pr_view(branch)
+        if existing and (existing.get("state") == "OPEN" and not existing.get("mergedAt")):
+            return existing
+        if existing and allow_merged_issue_pr:
+            return existing
+
     issue_pr = pr_for_issue(card.gh_number)
     if issue_pr and (allow_merged_issue_pr or (issue_pr.get("state") == "OPEN" and not issue_pr.get("mergedAt"))):
         return issue_pr
-    if not card.local_workspace_id:
+    if not card.local_workspace_id or not branch:
         return None
-    branch = None
-    con = sqlite3.connect(LOCAL_DB)
-    con.row_factory = sqlite3.Row
-    row = con.execute("select branch from workspaces where id=cast(? as blob)", (bytes.fromhex(card.local_workspace_id.replace('-', '')),)).fetchone()
-    if row:
-        branch = row["branch"]
-    if not branch:
-        return None
-    existing = pr_view(branch)
-    if existing:
-        return existing
     wd = workspace_workdir(card)
     if not wd or not Path(wd).exists():
         print(f"{card.simple_id}: cannot create PR; missing workdir for branch {branch}")
