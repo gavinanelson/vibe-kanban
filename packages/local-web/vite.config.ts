@@ -78,6 +78,9 @@ export default schemas;
   };
 }
 
+const enableReactCompiler = process.env.VITE_REACT_COMPILER !== 'false';
+const enableSentryPlugin = process.env.VITE_SENTRY_PLUGIN !== 'false';
+
 export default defineConfig({
   customLogger: createFilteredLogger(),
   publicDir: path.resolve(__dirname, '../public'),
@@ -90,27 +93,31 @@ export default defineConfig({
       autoCodeSplitting: false,
     }),
     react({
-      babel: {
-        plugins: [
-          [
-            'babel-plugin-react-compiler',
-            {
-              target: '18',
-              sources: [
-                path.resolve(__dirname, 'src'),
-                path.resolve(__dirname, '../web-core/src'),
+      babel: enableReactCompiler
+        ? {
+            plugins: [
+              [
+                'babel-plugin-react-compiler',
+                {
+                  target: '18',
+                  sources: [
+                    path.resolve(__dirname, 'src'),
+                    path.resolve(__dirname, '../web-core/src'),
+                  ],
+                  environment: {
+                    enableResetCacheOnSourceFileChanges: true,
+                  },
+                },
               ],
-              environment: {
-                enableResetCacheOnSourceFileChanges: true,
-              },
-            },
-          ],
-        ],
-      },
+            ],
+          }
+        : undefined,
     }),
-    sentryVitePlugin({ org: 'bloop-ai', project: 'vibe-kanban' }),
+    enableSentryPlugin
+      ? sentryVitePlugin({ org: 'bloop-ai', project: 'vibe-kanban' })
+      : null,
     executorSchemasPlugin(),
-  ],
+  ].filter(Boolean),
   resolve: {
     alias: [
       {
@@ -147,5 +154,8 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['wa-sqlite'],
   },
-  build: { sourcemap: process.env.VITE_SOURCEMAP !== 'false' },
+  build: {
+    minify: process.env.VITE_MINIFY === 'false' ? false : 'esbuild',
+    sourcemap: process.env.VITE_SOURCEMAP !== 'false',
+  },
 });

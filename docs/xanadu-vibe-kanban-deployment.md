@@ -7,21 +7,21 @@ Gavin's fork can deploy Vibe Kanban to `xanadu-host` with the same GitHub Action
 - branch: `main`
 - environment: `xanadu-production`
 - public URL: `https://vibe.yxanadu.com`
-- launchd service: `com.xanadu.vibe-kanban`
-- loopback app: `http://127.0.0.1:3063`
-- loopback preview proxy: `http://127.0.0.1:3064`
+- service state: `/home/coder/.local/state/paddys/vibe-kanban-deploy`
+- loopback app: `http://127.0.0.1:8080`
+- loopback backend API: `http://127.0.0.1:8082`
+- loopback preview proxy: `http://127.0.0.1:8081`
 
 The workflow expects a self-hosted runner available to `gavinanelson/vibe-kanban` with these labels:
 
 ```text
 self-hosted
-macOS
+Linux
 ARM64
-xanadu-host
 vibe-kanban-deploy
 ```
 
-Open WebUI currently has an online repo runner named `xanadu-host-open-webui-deploy`. Vibe Kanban needs an equivalent runner registration, or that runner must be moved to a scope where this fork can use it.
+Open WebUI uses a separate repo-scoped runner. Vibe Kanban needs its own runner registered to `gavinanelson/vibe-kanban` with the labels above.
 
 Manual deploy from a configured `xanadu-host` checkout:
 
@@ -32,8 +32,10 @@ GITHUB_REF_NAME=main ./scripts/deploy-xanadu-vibe-kanban.sh
 Manual verification on `xanadu-host`:
 
 ```bash
-curl -s http://127.0.0.1:3063/health
-curl -ks https://vibe.yxanadu.com/health
-launchctl print gui/$(id -u)/com.xanadu.vibe-kanban
+curl -s http://127.0.0.1:8080/
+curl -s http://127.0.0.1:8080/api/info
+curl -s http://127.0.0.1:8082/api/info
+curl -ks https://vibe.yxanadu.com/api/info
+cat /home/coder/.local/state/paddys/vibe-kanban-deploy/vibe-kanban.pid
 gh run list -R gavinanelson/vibe-kanban --workflow deploy-xanadu-vibe-kanban.yml --limit 5
 ```

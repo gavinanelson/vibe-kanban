@@ -18,9 +18,8 @@ jobs:
       url: https://vibe.yxanadu.com
     runs-on:
       - self-hosted
-      - macOS
+      - Linux
       - ARM64
-      - xanadu-host
       - vibe-kanban-deploy
     timeout-minutes: 120
     permissions:
@@ -39,6 +38,7 @@ jobs:
       - name: Deploy to xanadu-host
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          VIBE_KANBAN_VERIFY_PUBLIC: "0"
         run: |
           chmod +x scripts/deploy-xanadu-vibe-kanban.sh
           ./scripts/deploy-xanadu-vibe-kanban.sh
@@ -47,8 +47,8 @@ jobs:
         run: |
           set -euo pipefail
           for url in \
-            http://127.0.0.1:3063/health \
-            https://vibe.yxanadu.com/health
+            http://127.0.0.1:8080/api/info \
+            http://127.0.0.1:8082/api/info
           do
             echo "checking $url"
             code=$(curl -k -sS -o /tmp/vibe-kanban-check -w '%{http_code}' "$url")
