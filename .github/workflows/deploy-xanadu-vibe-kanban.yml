@@ -38,8 +38,14 @@ jobs:
       - name: Deploy to xanadu-host
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_DEPLOY_SHA: ${{ github.sha }}
+          VIBE_KANBAN_LIVE_REPO: /workspace/projects/vibe-kanban
           VIBE_KANBAN_VERIFY_PUBLIC: "0"
         run: |
+          set -euo pipefail
+          cd "$VIBE_KANBAN_LIVE_REPO"
+          git fetch origin main
+          git checkout -B main "$GITHUB_DEPLOY_SHA"
           chmod +x scripts/deploy-xanadu-vibe-kanban.sh
           ./scripts/deploy-xanadu-vibe-kanban.sh
 

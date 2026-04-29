@@ -27,8 +27,10 @@ SHORT_SHA="$(git -C "$REPO_ROOT" rev-parse --short=9 HEAD)"
 REPO_URL="$(git -C "$REPO_ROOT" remote get-url origin)"
 
 if [[ "$BRANCH_NAME" != "main" ]]; then
-  echo "Refusing to deploy Vibe Kanban from branch '$BRANCH_NAME' (allowed: main only)" >&2
-  exit 1
+  if [[ -z "${GITHUB_DEPLOY_SHA:-}" ]] || [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$GITHUB_DEPLOY_SHA" ]]; then
+    echo "Refusing to deploy Vibe Kanban from branch '$BRANCH_NAME' (allowed: main only)" >&2
+    exit 1
+  fi
 fi
 
 if [[ ! -d "$WORKDIR" ]]; then
@@ -255,7 +257,8 @@ else
         BACKEND_PORT="$BACKEND_PORT" \
         PREVIEW_PROXY_PORT="$PREVIEW_PROXY_PORT" \
         VIBE_KANBAN_REPO_ROOT="$REPO_ROOT" \
-        nohup "$BIN_DIR/vibe-kanban-dev-shim" > "$LOG_DIR/server.out.log" 2> "$LOG_DIR/server.err.log" &
+        env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS \
+        setsid "$BIN_DIR/vibe-kanban-dev-shim" > "$LOG_DIR/server.out.log" 2> "$LOG_DIR/server.err.log" &
       echo $! > "$PID_FILE"
     )
   else
@@ -272,7 +275,8 @@ else
       export VK_OPEN_BROWSER=0
       export RUST_LOG="${RUST_LOG:-info}"
       export VK_ALLOWED_ORIGINS="${VK_ALLOWED_ORIGINS:-http://127.0.0.1:$PORT,http://localhost:$PORT,$PUBLIC_URL}"
-      nohup "$BIN_DIR/vibe-kanban-server" > "$LOG_DIR/server.out.log" 2> "$LOG_DIR/server.err.log" &
+      env -u RUNNER_TRACKING_ID -u GITHUB_ACTIONS \
+        setsid "$BIN_DIR/vibe-kanban-server" > "$LOG_DIR/server.out.log" 2> "$LOG_DIR/server.err.log" &
       echo $! > "$PID_FILE"
     )
   fi
