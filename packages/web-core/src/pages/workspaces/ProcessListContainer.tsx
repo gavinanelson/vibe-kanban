@@ -1,15 +1,67 @@
 import { useEffect, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQueries } from '@tanstack/react-query';
 import { useExecutionProcessesContext } from '@/shared/hooks/useExecutionProcessesContext';
 import { useLogsPanel } from '@/shared/hooks/useLogsPanel';
 import { ProcessListItem } from '@vibe/ui/components/ProcessListItem';
 import { InputField } from '@vibe/ui/components/InputField';
+import { executionProcessesApi } from '@/shared/lib/api';
+import { executorConfigFromAction } from '@/shared/lib/executor';
 import {
   CaretUpIcon,
   CaretDownIcon,
   TerminalIcon,
 } from '@phosphor-icons/react';
 import { cn } from '@/shared/lib/utils';
+import type { ExecutionProcess, ExecutionProcessRepoState } from 'shared/types';
+
+function formatExecutorLabel(process: ExecutionProcess): string | null {
+  const executorConfig = executorConfigFromAction(
+    process.executor_action ?? null
+  );
+
+  if (!executorConfig) {
+    return null;
+  }
+
+  return [executorConfig.executor, executorConfig.variant]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function formatRepoStateSummary(
+  states: ExecutionProcessRepoState[] | undefined,
+  isFetching: boolean
+): string | null {
+  if (isFetching) {
+    return 'checking changes';
+  }
+
+  if (!states?.length) {
+    return null;
+  }
+
+  const changedRepoCount = states.filter(
+    (state) => state.before_head_commit !== state.after_head_commit
+  ).length;
+  const commitCount = states.filter((state) => state.merge_commit).length;
+
+  if (changedRepoCount === 0 && commitCount === 0) {
+    return 'no repo changes';
+  }
+
+  const parts = [];
+  if (changedRepoCount > 0) {
+    parts.push(
+      `${changedRepoCount} repo ${changedRepoCount === 1 ? 'changed' : 'changes'}`
+    );
+  }
+  if (commitCount > 0) {
+    parts.push(`${commitCount} ${commitCount === 1 ? 'commit' : 'commits'}`);
+  }
+
+  return parts.join(' · ');
+}
 
 export function ProcessListContainer() {
   const {
@@ -41,6 +93,29 @@ export function ProcessListContainer() {
       );
     });
   }, [executionProcessesVisible]);
+
+  const repoStateQueries = useQueries({
+    queries: sortedProcesses.map((process) => ({
+      queryKey: ['executionProcessRepoStates', process.id],
+      queryFn: () => executionProcessesApi.getRepoStates(process.id),
+      enabled: process.status !== 'running',
+      staleTime: 30_000,
+    })),
+  });
+
+  const processSummariesById = useMemo(() => {
+    const summaries: Record<string, string | null> = {};
+
+    sortedProcesses.forEach((process, index) => {
+      const query = repoStateQueries[index];
+      summaries[process.id] = formatRepoStateSummary(
+        query?.data,
+        Boolean(query?.isFetching)
+      );
+    });
+
+    return summaries;
+  }, [sortedProcesses, repoStateQueries]);
 
   // Auto-select latest process if none selected (unless disabled)
   useEffect(() => {
@@ -155,6 +230,10 @@ export function ProcessListContainer() {
             runReason={process.run_reason}
             status={process.status}
             startedAt={process.started_at}
+            completedAt={process.completed_at}
+            executorLabel={formatExecutorLabel(process)}
+            exitCode={process.exit_code}
+            resultSummary={processSummariesById[process.id]}
             selected={process.id === selectedProcessId}
             onClick={() => handleSelectProcess(process.id)}
           />

@@ -11,6 +11,10 @@ interface ProcessListItemProps {
   runReason: string;
   status: string;
   startedAt: string;
+  completedAt?: string | null;
+  executorLabel?: string | null;
+  exitCode?: string | number | bigint | null;
+  resultSummary?: string | null;
   selected?: boolean;
   onClick?: () => void;
   className?: string;
@@ -51,19 +55,38 @@ function getRunReasonIcon(runReason: string): typeof TerminalIcon {
 function getStatusColor(status: string): string {
   switch (status) {
     case 'running':
-      return 'bg-info';
+      return 'bg-info/10 text-info';
     case 'completed':
-      return 'bg-success';
+      return 'bg-success/10 text-success';
     case 'failed':
-      return 'bg-destructive';
+      return 'bg-destructive/10 text-destructive';
     case 'killed':
-      return 'bg-low';
+      return 'bg-tertiary text-low';
     default:
-      return 'bg-low';
+      return 'bg-tertiary text-low';
   }
 }
 
-function formatRelativeElapsed(dateString: string): string {
+function getStatusLabel(status: string): string {
+  switch (status) {
+    case 'running':
+      return 'Running';
+    case 'completed':
+      return 'Completed';
+    case 'failed':
+      return 'Failed';
+    case 'killed':
+      return 'Killed';
+    default:
+      return status;
+  }
+}
+
+function formatRelativeElapsed(dateString: string | null | undefined): string {
+  if (!dateString) {
+    return '';
+  }
+
   const date = new Date(dateString);
   if (Number.isNaN(date.getTime())) {
     return '';
@@ -86,6 +109,10 @@ export function ProcessListItem({
   runReason,
   status,
   startedAt,
+  completedAt,
+  executorLabel,
+  exitCode,
+  resultSummary,
   selected,
   onClick,
   className,
@@ -93,40 +120,61 @@ export function ProcessListItem({
   const IconComponent = getRunReasonIcon(runReason);
   const label = getRunReasonLabel(runReason);
   const statusColor = getStatusColor(status);
+  const statusLabel = getStatusLabel(status);
 
   const isRunning = status === 'running';
+  const elapsedLabel = formatRelativeElapsed(
+    isRunning ? startedAt : completedAt || startedAt
+  );
+  const exitLabel =
+    !isRunning && exitCode !== null && exitCode !== undefined
+      ? `exit ${String(exitCode)}`
+      : null;
+  const detailParts = [
+    executorLabel || null,
+    isRunning ? 'live' : exitLabel,
+    resultSummary || null,
+    elapsedLabel || null,
+  ].filter(Boolean);
 
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        'w-full h-[26px] flex items-center gap-half px-half rounded-sm text-left transition-colors',
+        'w-full min-h-11 flex items-center gap-2 px-half py-1 rounded-sm text-left transition-colors',
+        selected ? 'bg-tertiary' : 'hover:bg-tertiary/60',
         className
       )}
+      title={`${label}: ${statusLabel}${detailParts.length ? ` - ${detailParts.join(' - ')}` : ''}`}
     >
       <IconComponent
         className="size-icon-sm flex-shrink-0 text-low"
         weight="regular"
       />
-      {isRunning ? (
-        <RunningDots />
-      ) : (
-        <span
-          className={cn('size-dot rounded-full flex-shrink-0', statusColor)}
-          title={status}
-        />
-      )}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2 min-w-0">
+          <span
+            className={cn(
+              'text-sm truncate',
+              selected ? 'text-high' : 'text-normal'
+            )}
+          >
+            {label}
+          </span>
+          {isRunning && <RunningDots />}
+        </span>
+        <span className="block text-xs text-low truncate">
+          {detailParts.join(' · ')}
+        </span>
+      </span>
       <span
         className={cn(
-          'text-sm truncate flex-1',
-          selected ? 'text-high' : 'text-normal'
+          'text-[11px] leading-5 h-5 px-1.5 rounded-sm uppercase tracking-normal flex-shrink-0',
+          statusColor
         )}
       >
-        {label}
-      </span>
-      <span className="text-xs text-low flex-shrink-0">
-        {formatRelativeElapsed(startedAt)}
+        {statusLabel}
       </span>
     </button>
   );
