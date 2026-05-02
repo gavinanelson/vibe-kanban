@@ -44,8 +44,69 @@ use crate::{DeploymentImpl, error::ApiError, middleware::load_workspace_middlewa
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 const DEFAULT_CODEX_REASONING: &str = "medium";
-const REVIEW_PROMPT: &str = "Review this workspace as an independent Codex reviewer. Do not implement changes. Check the linked GitHub issue acceptance criteria, PR/diff scope, validation evidence, and hygiene. Return one of exactly `Decision: pass` or `Decision: request changes`, followed by blockers, non-blocking notes, validation evidence, and recommended next action.";
-const REVIEW_FIX_PROMPT: &str = "Continue the existing implementation by fixing only the blocking issues from the latest auto-review. Use Codex gpt-5.5 with medium reasoning. Keep the change bounded, preserve unrelated dirty work, run focused validation, and do not merge or claim the PR is merged. End with files changed, validation, and whether another auto-review is needed.";
+const REVIEW_PROMPT: &str = r#"You are the app-owned Implication autopilot reviewer.
+
+This is an unattended review session. Do not implement changes. Do not ask the operator to do routine follow-up. Your job is to decide whether the current workspace/PR/head is safe for the app to move toward merge.
+
+Review discipline:
+- Re-read the linked GitHub issue and treat its acceptance criteria, validation/test-plan sections, and labels as the contract.
+- Inspect the current diff/PR scope, not stale prior review output.
+- Check whether the implementation includes credible validation evidence for the changed behavior.
+- Look for blockers only: correctness regressions, missing acceptance criteria, unsafe merge/PR state, unresolved conflicts, failing or missing required checks, security/data-loss risk, or hygiene failures that would make the PR unsafe to merge.
+- Do not request changes for style preferences, speculative improvements, or unrelated cleanup. Put those under non-blocking notes.
+- If PR/check/mergeability state is unavailable from your tools, report that as a blocker only when it prevents a safe merge decision.
+
+Required final format:
+
+Decision: pass
+Blockers:
+- None
+Validation evidence:
+- ...
+Non-blocking notes:
+- ...
+Recommended next action:
+- Merge when app-visible PR checks and mergeability are green.
+
+or:
+
+Decision: request changes
+Blockers:
+- ...
+Validation evidence:
+- ...
+Non-blocking notes:
+- ...
+Recommended next action:
+- Start a bounded review-fix session for the blockers above.
+
+The first line must be exactly one of `Decision: pass` or `Decision: request changes`."#;
+const REVIEW_FIX_PROMPT: &str = r#"You are the Implication autopilot fix worker continuing an existing task.
+
+This is an unattended orchestration session. Do not ask the operator for routine next steps. Only stop early for a true external blocker: missing required auth, permissions, secrets, or tooling after checking documented fallbacks.
+
+Scope:
+- Fix only the blocking issues from the latest auto-review excerpt below.
+- Preserve unrelated dirty work and avoid unrelated refactors.
+- Re-read the linked GitHub issue before editing. Treat acceptance criteria and any Validation/Test Plan/Testing section as mandatory.
+- Work from the current workspace state. Do not restart the task from scratch unless the review explicitly requires that.
+
+Execution protocol:
+1. Identify each blocker you are addressing.
+2. Inspect the current diff and relevant code before editing.
+3. Make the smallest coherent fix that satisfies the issue contract.
+4. Run focused validation that directly proves the fix. Do not run broad guarded validation unless explicitly allowed by repo policy.
+5. If validation fails, fix and rerun until the focused proof is green or a true blocker remains.
+6. Do not merge the PR and do not claim it is merged. The app owns re-review and merge.
+
+Final response must include:
+- Files changed
+- Blockers fixed
+- Validation run and result
+- Remaining blockers, or `None`
+- Whether another auto-review is needed
+
+Keep the response concise and factual. The app will start a new auto-review after this session completes."#;
 
 static ADVANCE_LOCKS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
 
@@ -106,6 +167,34 @@ pub enum AutopilotTokenSafetyState {
     Blocked,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AutopilotPrChecksState {
+    Unknown,
+    NoChecks,
+    Pending,
+    Passing,
+    Failing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AutopilotPrStatus {
+    pub number: i64,
+    pub url: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub head_sha: Option<String>,
+    pub base_branch: Option<String>,
+    pub mergeable: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub merge_commit_sha: Option<String>,
+    pub checks_state: AutopilotPrChecksState,
+    pub checks_summary: String,
+    pub merge_blocker: Option<String>,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AutopilotProcessSummary {
     pub id: Uuid,
@@ -141,6 +230,7 @@ pub struct ImplicationAutopilotStatus {
     pub duplicate_prevention_key: String,
     pub token_safety_state: AutopilotTokenSafetyState,
     pub token_safety_note: String,
+    pub pr_status: Option<AutopilotPrStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -157,6 +247,7 @@ pub enum AutopilotAdvanceAction {
     PromotedToReview,
     StartedAutoReview,
     StartedReviewFix,
+    MergedPullRequest,
     MergeHandoff,
     Blocked,
 }
@@ -397,8 +488,14 @@ async fn start_auto_review_for_workspace(
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
     let (latest_review_decision, _, latest_review_process) =
         decide_from_review_attempts(deployment, &review_processes).await;
-    let pr_merge_state =
-        infer_pr_merge_state(deployment, workspace, &latest_review_decision).await?;
+    let pr_status = latest_pr_status(deployment, workspace).await;
+    let pr_merge_state = infer_pr_merge_state(
+        deployment,
+        workspace,
+        &latest_review_decision,
+        pr_status.as_ref(),
+    )
+    .await?;
 
     if let Err(message) = auto_review_start_gate(
         workspace,
@@ -407,6 +504,7 @@ async fn start_auto_review_for_workspace(
         latest_review_process,
         review_fix_process,
         &pr_merge_state,
+        pr_status.as_ref(),
         rerun,
     ) {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
@@ -675,6 +773,17 @@ fn merge_plan_from_state(pr_merge_state: &str) -> AutopilotMergePlan {
             "PR merge is blocked by GitHub checks, reviews, conflicts, or mergeability."
                 .to_string(),
         ),
+        "blocked_by_draft_pr" => AutopilotMergePlan::Blocked("PR is still a draft.".to_string()),
+        "blocked_by_failing_checks" => {
+            AutopilotMergePlan::Blocked("PR has failing checks.".to_string())
+        }
+        "blocked_by_pr_mergeability" => AutopilotMergePlan::Blocked(
+            "PR is not currently mergeable according to GitHub.".to_string(),
+        ),
+        "waiting_for_checks" => {
+            AutopilotMergePlan::Blocked("PR checks are not green yet.".to_string())
+        }
+        "review_passed_merge_status_unknown" => AutopilotMergePlan::AttemptPrMerge,
         "no_pr_merge_found" => AutopilotMergePlan::Blocked(
             "Review passed, but no open or merged pull request is linked to this workspace."
                 .to_string(),
@@ -932,7 +1041,7 @@ async fn reconcile_workspace_done(
     issue: Option<&Issue>,
 ) -> Result<(), ApiError> {
     if let Some(issue) = issue {
-        move_issue_to_done(&deployment.remote_client()?, issue).await?;
+        promote_issue_to_done(&deployment.remote_client()?, issue).await?;
     }
 
     if !workspace.pinned {
@@ -1071,16 +1180,14 @@ async fn promote_issue_to_in_review(
     Ok(true)
 }
 
-async fn move_issue_to_done(client: &RemoteClient, issue: &Issue) -> Result<bool, ApiError> {
+async fn promote_issue_to_done(client: &RemoteClient, issue: &Issue) -> Result<bool, ApiError> {
     let statuses = client.list_project_statuses(issue.project_id).await?;
     let Some(done) = statuses
         .project_statuses
         .iter()
         .find(|status| status.name.trim().eq_ignore_ascii_case("done"))
     else {
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            "Cannot mark issue done because the project has no Done status.".to_string(),
-        )));
+        return Ok(false);
     };
 
     if issue.status_id == done.id && issue.completed_at.is_some() {
@@ -1134,8 +1241,14 @@ async fn build_status(
         latest_review_decision.clone()
     };
     let review_fix_state = review_fix_state(review_fix_process);
-    let pr_merge_state =
-        infer_pr_merge_state(deployment, workspace, &latest_review_decision).await?;
+    let pr_status = latest_pr_status(deployment, workspace).await;
+    let pr_merge_state = infer_pr_merge_state(
+        deployment,
+        workspace,
+        &latest_review_decision,
+        pr_status.as_ref(),
+    )
+    .await?;
     let (next_action, blocker) = next_action(
         workspace,
         implementation_process,
@@ -1143,6 +1256,7 @@ async fn build_status(
         auto_review_process,
         review_fix_process,
         &pr_merge_state,
+        pr_status.as_ref(),
     );
     let (token_safety_state, token_safety_note) = token_safety(
         &next_action,
@@ -1190,6 +1304,7 @@ async fn build_status(
         ),
         token_safety_state,
         token_safety_note,
+        pr_status,
     })
 }
 
@@ -1249,6 +1364,242 @@ fn process_summary_from_parts(
         exit_code,
         started_at,
         completed_at,
+    }
+}
+
+async fn latest_pr_status(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Option<AutopilotPrStatus> {
+    let local_pr = PullRequest::find_by_workspace_id(&deployment.db().pool, workspace.id)
+        .await
+        .ok()
+        .and_then(|prs| prs.into_iter().next());
+
+    if let Some(pr) = local_pr {
+        return Some(pr_status_from_url(&pr.pr_url).await.unwrap_or_else(|| {
+            AutopilotPrStatus {
+                number: pr.pr_number,
+                url: pr.pr_url,
+                state: format!("{:?}", pr.pr_status).to_ascii_lowercase(),
+                is_draft: false,
+                head_sha: None,
+                base_branch: Some(pr.target_branch_name),
+                mergeable: None,
+                merge_state_status: None,
+                merge_commit_sha: pr.merge_commit_sha,
+                checks_state: AutopilotPrChecksState::Unknown,
+                checks_summary:
+                    "PR is tracked locally, but live GitHub check details are unavailable."
+                        .to_string(),
+                merge_blocker: Some(
+                    "Live GitHub PR status is unavailable; cannot verify checks or mergeability."
+                        .to_string(),
+                ),
+                source: "local".to_string(),
+            }
+        }));
+    }
+
+    let client = deployment.remote_client().ok()?;
+    let remote_workspace = client.get_workspace_by_local_id(workspace.id).await.ok()?;
+    let issue_id = remote_workspace.issue_id?;
+    let issue = client.get_issue(issue_id).await.ok()?;
+    let pr_url = latest_pr_url_from_issue_metadata(&issue.extension_metadata)?;
+    pr_status_from_url(&pr_url).await
+}
+
+fn latest_pr_url_from_issue_metadata(metadata: &Value) -> Option<String> {
+    metadata
+        .get("github_link")
+        .and_then(|link| link.get("latest_pr_url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn pr_status_from_url(pr_url: &str) -> Option<AutopilotPrStatus> {
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            pr_url,
+            "--json",
+            "number,url,state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,mergeCommit,statusCheckRollup",
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let number = value.get("number").and_then(Value::as_i64)?;
+    let url = value
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or(pr_url)
+        .to_string();
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("UNKNOWN")
+        .to_ascii_lowercase();
+    let is_draft = value
+        .get("isDraft")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let head_sha = value
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let mergeable = value
+        .get("mergeable")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let merge_state_status = value
+        .get("mergeStateStatus")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let base_branch = value
+        .get("baseRefName")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let merge_commit_sha = value
+        .get("mergeCommit")
+        .and_then(|commit| commit.get("oid"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let (checks_state, checks_summary) = summarize_check_rollup(value.get("statusCheckRollup"));
+    let merge_blocker = pr_merge_blocker(
+        is_draft,
+        mergeable.as_deref(),
+        merge_state_status.as_deref(),
+        &checks_state,
+    );
+
+    Some(AutopilotPrStatus {
+        number,
+        url,
+        state,
+        is_draft,
+        head_sha,
+        base_branch,
+        mergeable,
+        merge_state_status,
+        merge_commit_sha,
+        checks_state,
+        checks_summary,
+        merge_blocker,
+        source: "github".to_string(),
+    })
+}
+
+fn summarize_check_rollup(rollup: Option<&Value>) -> (AutopilotPrChecksState, String) {
+    let Some(checks) = rollup.and_then(Value::as_array) else {
+        return (
+            AutopilotPrChecksState::Unknown,
+            "GitHub did not return check details.".to_string(),
+        );
+    };
+    if checks.is_empty() {
+        return (
+            AutopilotPrChecksState::NoChecks,
+            "No required or reported checks were found.".to_string(),
+        );
+    }
+
+    let mut passing = 0usize;
+    let mut pending = 0usize;
+    let mut failing = Vec::new();
+
+    for check in checks {
+        let name = check_name(check);
+        let conclusion = check
+            .get("conclusion")
+            .or_else(|| check.get("state"))
+            .or_else(|| check.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("UNKNOWN")
+            .to_ascii_uppercase();
+        match conclusion.as_str() {
+            "SUCCESS" | "SKIPPED" | "NEUTRAL" | "COMPLETED" => passing += 1,
+            "PENDING" | "QUEUED" | "REQUESTED" | "WAITING" | "IN_PROGRESS" | "EXPECTED" => {
+                pending += 1
+            }
+            "FAILURE" | "FAILED" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" => {
+                failing.push(name)
+            }
+            _ => pending += 1,
+        }
+    }
+
+    if !failing.is_empty() {
+        return (
+            AutopilotPrChecksState::Failing,
+            format!(
+                "{} failing check(s): {}",
+                failing.len(),
+                failing.into_iter().take(3).collect::<Vec<_>>().join(", ")
+            ),
+        );
+    }
+    if pending > 0 {
+        return (
+            AutopilotPrChecksState::Pending,
+            format!("{pending} pending check(s), {passing} passing."),
+        );
+    }
+    (
+        AutopilotPrChecksState::Passing,
+        format!("{passing} check(s) passing."),
+    )
+}
+
+fn check_name(check: &Value) -> String {
+    ["name", "context", "workflowName"]
+        .iter()
+        .filter_map(|key| check.get(*key).and_then(Value::as_str))
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or("unnamed check")
+        .to_string()
+}
+
+fn pr_merge_blocker(
+    is_draft: bool,
+    mergeable: Option<&str>,
+    merge_state_status: Option<&str>,
+    checks_state: &AutopilotPrChecksState,
+) -> Option<String> {
+    if is_draft {
+        return Some("PR is still a draft.".to_string());
+    }
+    if mergeable.is_none() {
+        return Some("PR mergeability is unknown.".to_string());
+    }
+    if mergeable.is_some_and(|value| value.eq_ignore_ascii_case("CONFLICTING"))
+        || merge_state_status.is_some_and(|value| {
+            matches!(
+                value.to_ascii_uppercase().as_str(),
+                "DIRTY" | "UNKNOWN" | "BLOCKED" | "BEHIND"
+            )
+        })
+    {
+        return Some(format!(
+            "PR is not currently mergeable ({}/{}).",
+            mergeable.unwrap_or("unknown"),
+            merge_state_status.unwrap_or("unknown")
+        ));
+    }
+    match checks_state {
+        AutopilotPrChecksState::Failing => Some("PR has failing checks.".to_string()),
+        AutopilotPrChecksState::Pending | AutopilotPrChecksState::Unknown => {
+            Some("PR checks are not green yet.".to_string())
+        }
+        AutopilotPrChecksState::NoChecks | AutopilotPrChecksState::Passing => None,
     }
 }
 
@@ -1560,6 +1911,7 @@ async fn infer_pr_merge_state(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
     decision: &AutopilotDecision,
+    pr_status: Option<&AutopilotPrStatus>,
 ) -> Result<String, ApiError> {
     if workspace.archived || workspace.worktree_deleted {
         return Ok("done_or_archived".to_string());
@@ -1573,6 +1925,24 @@ async fn infer_pr_merge_state(
             AutopilotDecision::Failed => "review_failed".to_string(),
             AutopilotDecision::Pass => unreachable!(),
         });
+    }
+
+    if let Some(pr_status) = pr_status {
+        if pr_status.state.eq_ignore_ascii_case("merged") {
+            return Ok("merged_pending_done".to_string());
+        }
+        if let Some(blocker) = pr_status.merge_blocker.as_deref() {
+            if blocker.contains("draft") {
+                return Ok("blocked_by_draft_pr".to_string());
+            }
+            if blocker.contains("failing checks") {
+                return Ok("blocked_by_failing_checks".to_string());
+            }
+            if blocker.contains("checks are not green") {
+                return Ok("waiting_for_checks".to_string());
+            }
+            return Ok("blocked_by_pr_mergeability".to_string());
+        }
     }
 
     let merges = Merge::find_by_workspace_id(&deployment.db().pool, workspace.id).await?;
@@ -1717,6 +2087,7 @@ fn auto_review_start_gate(
     latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
+    pr_status: Option<&AutopilotPrStatus>,
     rerun: bool,
 ) -> Result<(), String> {
     let (action, blocker) = next_action(
@@ -1726,6 +2097,7 @@ fn auto_review_start_gate(
         latest_review,
         review_fix,
         pr_merge_state,
+        pr_status,
     );
 
     if action != AutopilotNextAction::StartAutoReview {
@@ -1960,8 +2332,13 @@ fn next_action(
     latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
+    _pr_status: Option<&AutopilotPrStatus>,
 ) -> (AutopilotNextAction, Option<String>) {
-    if workspace.archived || workspace.worktree_deleted || pr_merge_state == "done_or_archived" {
+    if workspace.archived
+        || workspace.worktree_deleted
+        || pr_merge_state == "done_or_archived"
+        || pr_merge_state == "merged"
+    {
         return (AutopilotNextAction::Done, None);
     }
     let Some(implementation) = implementation else {
@@ -2006,9 +2383,15 @@ fn next_action(
         },
         AutopilotDecision::Pass => match merge_plan_from_state(pr_merge_state) {
             AutopilotMergePlan::Blocked(blocker)
-                if pr_merge_state == "blocked_by_dirty_worktree" =>
+                if pr_merge_state == "blocked_by_dirty_worktree"
+                    || pr_merge_state == "blocked_by_draft_pr"
+                    || pr_merge_state == "blocked_by_failing_checks"
+                    || pr_merge_state == "blocked_by_pr_mergeability" =>
             {
                 (AutopilotNextAction::InvestigateFailure, Some(blocker))
+            }
+            AutopilotMergePlan::Blocked(blocker) if pr_merge_state == "waiting_for_checks" => {
+                (AutopilotNextAction::MergeWait, Some(blocker))
             }
             AutopilotMergePlan::Blocked(blocker) => {
                 (AutopilotNextAction::ReadyForMerge, Some(blocker))
@@ -2217,6 +2600,27 @@ mod tests {
         BatchAdvanceRelationship {
             issue_id,
             blocking_issue_id: blocker,
+        }
+    }
+
+    fn pr_status(
+        checks_state: AutopilotPrChecksState,
+        merge_blocker: Option<&str>,
+    ) -> AutopilotPrStatus {
+        AutopilotPrStatus {
+            number: 123,
+            url: "https://github.com/gavinanelson/implication/pull/123".to_string(),
+            state: "open".to_string(),
+            is_draft: false,
+            head_sha: Some("abc123".to_string()),
+            base_branch: Some("main".to_string()),
+            mergeable: Some("MERGEABLE".to_string()),
+            merge_state_status: Some("CLEAN".to_string()),
+            merge_commit_sha: None,
+            checks_state,
+            checks_summary: "checks summary".to_string(),
+            merge_blocker: merge_blocker.map(ToString::to_string),
+            source: "test".to_string(),
         }
     }
 
@@ -2454,6 +2858,7 @@ mod tests {
                 None,
                 None,
                 "waiting_for_review",
+                None,
                 false,
             ),
             Ok(())
@@ -2485,6 +2890,7 @@ mod tests {
                 Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
+                None,
                 false,
             ),
             Err("Auto-review rerun must be explicit after review fix completes.".to_string())
@@ -2498,6 +2904,7 @@ mod tests {
                 Some(&review),
                 Some(&review_fix),
                 "blocked_by_review",
+                None,
                 true,
             ),
             Ok(())
@@ -2518,6 +2925,7 @@ mod tests {
                 Some(&review),
                 None,
                 "blocked_by_review",
+                None,
                 false,
             ),
             Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
@@ -2548,6 +2956,7 @@ mod tests {
             Some(&latest_review),
             Some(&old_review_fix),
             "blocked_by_review",
+            None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::StartReviewFix);
@@ -2560,6 +2969,7 @@ mod tests {
                 Some(&latest_review),
                 Some(&old_review_fix),
                 "blocked_by_review",
+                None,
                 true,
             ),
             Err("Auto-review cannot start while the next action is start_review_fix.".to_string())
@@ -2621,6 +3031,7 @@ mod tests {
             Some(&latest_review),
             Some(&failed_review_fix),
             "blocked_by_review",
+            None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
@@ -2654,6 +3065,7 @@ mod tests {
             None,
             None,
             "pr_open_pending_merge",
+            None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::ReadyForMerge);
@@ -2742,6 +3154,7 @@ mod tests {
             None,
             None,
             "done_or_archived",
+            None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::Done);
@@ -2759,6 +3172,7 @@ mod tests {
             None,
             None,
             "blocked_by_dirty_worktree",
+            None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
@@ -2773,6 +3187,52 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn next_action_blocks_review_pass_on_dirty_pr_without_rerunning_review() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+        let pr = pr_status(
+            AutopilotPrChecksState::Passing,
+            Some("PR is not currently mergeable (CONFLICTING/DIRTY)."),
+        );
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            None,
+            "blocked_by_pr_mergeability",
+            Some(&pr),
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
+        assert!(blocker.unwrap().contains("not currently mergeable"));
+    }
+
+    #[test]
+    fn next_action_waits_for_pending_checks_after_review_pass() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+        let pr = pr_status(
+            AutopilotPrChecksState::Pending,
+            Some("PR checks are not green yet."),
+        );
+
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            None,
+            "waiting_for_checks",
+            Some(&pr),
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::MergeWait);
+        assert!(blocker.unwrap().contains("not green"));
     }
 
     #[test]

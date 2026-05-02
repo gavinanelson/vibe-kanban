@@ -46,6 +46,16 @@ export interface ImplicationAutopilotPanelStatus {
   workflowState: string;
   workflowStateReason: string;
   duplicatePreventionKey: string;
+  prStatus?: {
+    number: number;
+    url: string;
+    state: string;
+    checksState: string;
+    checksSummary?: string | null;
+    mergeState: string;
+    mergeBlocker?: string | null;
+    headSha?: string | null;
+  } | null;
 }
 
 const NEXT_ACTION_DISPLAY: Record<
@@ -80,7 +90,7 @@ const NEXT_ACTION_DISPLAY: Record<
   ready_for_merge: {
     label: 'Ready for merge',
     description:
-      'Auto-review passed; open the PR, verify checks and mergeability, then complete the handoff.',
+      'Auto-review passed and PR checks/mergeability are green; the app can merge now.',
   },
   merge_wait: {
     label: 'Merge in progress',
@@ -175,6 +185,7 @@ export function buildImplicationAutopilotPanelStatus(
       workflowStateReason:
         'Queued until a local workspace is linked to the issue.',
       duplicatePreventionKey: 'no-workspace',
+      prStatus: null,
     };
   }
 
@@ -223,6 +234,25 @@ export function buildImplicationAutopilotPanelStatus(
     workflowState,
     workflowStateReason: status.workflow_state_reason,
     duplicatePreventionKey: status.duplicate_prevention_key,
+    prStatus: status.pr_status
+      ? {
+          number: status.pr_status.number,
+          url: status.pr_status.url,
+          state: formatImplicationAutopilotValue(status.pr_status.state),
+          checksState: formatImplicationAutopilotValue(
+            status.pr_status.checks_state
+          ),
+          checksSummary: status.pr_status.checks_summary,
+          mergeState: [
+            status.pr_status.mergeable,
+            status.pr_status.merge_state_status,
+          ]
+            .filter(Boolean)
+            .join(' / '),
+          mergeBlocker: status.pr_status.merge_blocker,
+          headSha: status.pr_status.head_sha,
+        }
+      : null,
   };
 }
 
@@ -383,13 +413,16 @@ function mergeStep(
     state,
     summary:
       state === 'available'
-        ? 'Review passed; verify PR checks and mergeability before merge.'
+        ? (status.pr_status?.merge_blocker ??
+          'Review passed; verify PR checks and mergeability before merge.')
         : state === 'running'
-          ? 'Merge handoff is in progress.'
+          ? (status.pr_status?.checks_summary ??
+            'Merge handoff is in progress.')
           : state === 'completed'
             ? 'Workspace is done or archived.'
             : state === 'blocked'
-              ? 'Blocked until review passes.'
+              ? (status.pr_status?.merge_blocker ??
+                'Blocked until review passes.')
               : 'Waiting for a passing auto-review.',
   };
 }

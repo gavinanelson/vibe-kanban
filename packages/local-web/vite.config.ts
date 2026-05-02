@@ -1,11 +1,11 @@
 // vite.config.ts
-import { sentryVitePlugin } from "@sentry/vite-plugin";
-import { createLogger, defineConfig, Plugin } from "vite";
-import react from "@vitejs/plugin-react";
-import { tanstackRouter } from "@tanstack/router-plugin/vite";
-import path from "path";
-import fs from "fs";
-import pkg from "./package.json";
+import { sentryVitePlugin } from '@sentry/vite-plugin';
+import { createLogger, defineConfig, Plugin } from 'vite';
+import react from '@vitejs/plugin-react';
+import { tanstackRouter } from '@tanstack/router-plugin/vite';
+import path from 'path';
+import fs from 'fs';
+import pkg from './package.json';
 
 function createFilteredLogger() {
   const logger = createLogger();
@@ -16,14 +16,14 @@ function createFilteredLogger() {
 
   logger.error = (msg, options) => {
     const isProxyError =
-      msg.includes("ws proxy socket error") ||
-      msg.includes("ws proxy error:") ||
-      msg.includes("http proxy error:");
+      msg.includes('ws proxy socket error') ||
+      msg.includes('ws proxy error:') ||
+      msg.includes('http proxy error:');
 
     if (isProxyError) {
       const now = Date.now();
       if (now - lastRestartLog > DEBOUNCE_MS) {
-        logger.warn("Proxy connection closed, auto-reconnecting...");
+        logger.warn('Proxy connection closed, auto-reconnecting...');
         lastRestartLog = now;
       }
       return;
@@ -78,6 +78,9 @@ export default schemas;
   };
 }
 
+const enableReactCompiler = process.env.VITE_REACT_COMPILER !== 'false';
+const enableSentryPlugin = process.env.VITE_SENTRY_PLUGIN !== 'false';
+
 export default defineConfig({
   customLogger: createFilteredLogger(),
   publicDir: path.resolve(__dirname, '../public'),
@@ -86,31 +89,35 @@ export default defineConfig({
   },
   plugins: [
     tanstackRouter({
-      target: "react",
+      target: 'react',
       autoCodeSplitting: false,
     }),
     react({
-      babel: {
-        plugins: [
-          [
-            'babel-plugin-react-compiler',
-            {
-              target: '18',
-              sources: [
-                path.resolve(__dirname, 'src'),
-                path.resolve(__dirname, '../web-core/src'),
+      babel: enableReactCompiler
+        ? {
+            plugins: [
+              [
+                'babel-plugin-react-compiler',
+                {
+                  target: '18',
+                  sources: [
+                    path.resolve(__dirname, 'src'),
+                    path.resolve(__dirname, '../web-core/src'),
+                  ],
+                  environment: {
+                    enableResetCacheOnSourceFileChanges: true,
+                  },
+                },
               ],
-              environment: {
-                enableResetCacheOnSourceFileChanges: true,
-              },
-            },
-          ],
-        ],
-      },
+            ],
+          }
+        : undefined,
     }),
-    sentryVitePlugin({ org: 'bloop-ai', project: 'vibe-kanban' }),
+    enableSentryPlugin
+      ? sentryVitePlugin({ org: 'bloop-ai', project: 'vibe-kanban' })
+      : null,
     executorSchemasPlugin(),
-  ],
+  ].filter(Boolean),
   resolve: {
     alias: [
       {
@@ -147,5 +154,8 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['wa-sqlite'],
   },
-  build: { sourcemap: true },
+  build: {
+    minify: process.env.VITE_MINIFY === 'false' ? false : 'esbuild',
+    sourcemap: process.env.VITE_SOURCEMAP !== 'false',
+  },
 });

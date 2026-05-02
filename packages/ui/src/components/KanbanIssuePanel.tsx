@@ -99,6 +99,16 @@ export interface ImplicationAutopilotPanelStatus {
   workflowState: string;
   workflowStateReason: string;
   duplicatePreventionKey: string;
+  prStatus?: {
+    number: number;
+    url: string;
+    state: string;
+    checksState: string;
+    checksSummary?: string | null;
+    mergeState: string;
+    mergeBlocker?: string | null;
+    headSha?: string | null;
+  } | null;
 }
 
 export interface LinkedGitHubIssue {
@@ -643,8 +653,6 @@ export function KanbanIssuePanel({
                       </button>
                     )}
                     {onAdvanceImplicationAutopilot &&
-                      implicationAutopilotStatus?.nextAction !==
-                        'ready_for_merge' &&
                       implicationAutopilotStatus?.nextAction !== 'done' &&
                       implicationAutopilotStatus?.nextAction !==
                         'investigate_failure' && (
@@ -656,7 +664,10 @@ export function KanbanIssuePanel({
                           title="Let the app advance the next safe autopilot step for this workspace."
                         >
                           <PlayIcon className="size-icon-xs" weight="bold" />
-                          Advance
+                          {implicationAutopilotStatus?.nextAction ===
+                          'ready_for_merge'
+                            ? 'Auto-merge PR'
+                            : 'Advance'}
                         </button>
                       )}
                     {onStartImplicationAutoReview &&
@@ -737,6 +748,41 @@ export function KanbanIssuePanel({
                         {implicationAutopilotStatus.workflowStateReason}
                       </p>
                     </div>
+
+                    {implicationAutopilotStatus.prStatus && (
+                      <div className="rounded-sm border border-border bg-panel/50 px-half py-half">
+                        <div className="flex flex-wrap items-center gap-half text-xs">
+                          <span className="font-medium text-high">PR</span>
+                          <a
+                            href={implicationAutopilotStatus.prStatus.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-brand hover:underline"
+                          >
+                            #{implicationAutopilotStatus.prStatus.number}
+                          </a>
+                          <span className="text-low">
+                            {implicationAutopilotStatus.prStatus.state}
+                          </span>
+                          <span className="text-low">
+                            {implicationAutopilotStatus.prStatus.checksState}
+                          </span>
+                        </div>
+                        <p className="mt-half text-xs text-low">
+                          {implicationAutopilotStatus.prStatus.checksSummary}
+                        </p>
+                        {implicationAutopilotStatus.prStatus.mergeState && (
+                          <p className="mt-half text-[11px] text-low">
+                            {implicationAutopilotStatus.prStatus.mergeState}
+                          </p>
+                        )}
+                        {implicationAutopilotStatus.prStatus.mergeBlocker && (
+                          <p className="mt-half text-xs text-warning">
+                            {implicationAutopilotStatus.prStatus.mergeBlocker}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     <div className="rounded-sm border border-border bg-panel/50 px-half py-half">
                       <div className="flex flex-wrap items-center gap-half text-xs">
