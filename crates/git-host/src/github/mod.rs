@@ -7,7 +7,7 @@ use std::{path::Path, time::Duration};
 use async_trait::async_trait;
 use backon::{ExponentialBuilder, Retryable};
 use cli::GitHubRepoInfo;
-pub use cli::{GhCli, GhCliError, GitHubIssueSummary};
+pub use cli::{GhCli, GhCliError, GitHubIssueComment, GitHubIssueSummary};
 use tokio::task;
 use tracing::info;
 

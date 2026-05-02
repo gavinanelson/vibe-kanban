@@ -129,6 +129,16 @@ pub struct GitHubIssueSummary {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct GitHubIssueComment {
+    pub id: String,
+    pub author_login: Option<String>,
+    pub author_association: String,
+    pub body: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub url: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhIssueResponse {
@@ -437,6 +447,56 @@ impl GhCli {
         Self::parse_issue(&raw, repo_full_name)
     }
 
+    pub fn get_issue_comments(
+        &self,
+        repo_full_name: &str,
+        issue_number: i64,
+        limit: usize,
+    ) -> Result<Vec<GitHubIssueComment>, GhCliError> {
+        let raw = self.run(
+            [
+                "issue",
+                "view",
+                &issue_number.to_string(),
+                "--repo",
+                repo_full_name,
+                "--json",
+                "comments",
+            ],
+            None,
+        )?;
+        let mut comments = Self::parse_issue_comments(&raw)?;
+        comments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        comments.truncate(limit.clamp(1, 25));
+        Ok(comments)
+    }
+
+    pub fn create_issue_comment(
+        &self,
+        repo_full_name: &str,
+        issue_number: i64,
+        body: &str,
+    ) -> Result<(), GhCliError> {
+        let mut body_file = NamedTempFile::new()
+            .map_err(|e| GhCliError::CommandFailed(format!("Failed to create temp file: {e}")))?;
+        body_file
+            .write_all(body.as_bytes())
+            .map_err(|e| GhCliError::CommandFailed(format!("Failed to write body: {e}")))?;
+
+        let args: Vec<OsString> = vec![
+            OsString::from("issue"),
+            OsString::from("comment"),
+            OsString::from(issue_number.to_string()),
+            OsString::from("--repo"),
+            OsString::from(repo_full_name),
+            OsString::from("--body-file"),
+            body_file.path().as_os_str().to_os_string(),
+        ];
+
+        self.run(args, None)?;
+        Ok(())
+    }
+
     /// Fetch comments for a pull request.
     pub fn get_pr_comments(
         &self,
@@ -614,6 +674,27 @@ impl GhCli {
         })?;
 
         Ok(Self::issue_response_to_summary(issue, repo_full_name))
+    }
+
+    fn parse_issue_comments(raw: &str) -> Result<Vec<GitHubIssueComment>, GhCliError> {
+        let wrapper: GhCommentsWrapper = serde_json::from_str(raw.trim()).map_err(|err| {
+            GhCliError::UnexpectedOutput(format!(
+                "Failed to parse gh issue comments response: {err}; raw: {raw}"
+            ))
+        })?;
+
+        Ok(wrapper
+            .comments
+            .into_iter()
+            .map(|comment| GitHubIssueComment {
+                id: comment.id,
+                author_login: comment.author.and_then(|author| author.login),
+                author_association: comment.author_association,
+                body: comment.body,
+                created_at: comment.created_at,
+                url: comment.url,
+            })
+            .collect())
     }
 
     fn issue_response_to_summary(

@@ -3,7 +3,7 @@ import { create, useModal } from '@ebay/nice-modal-react';
 import { useTranslation } from 'react-i18next';
 import { GitBranchIcon, PlusIcon } from '@phosphor-icons/react';
 import { defineModal } from '@/shared/lib/modals';
-import { ApiError, workspacesApi } from '@/shared/lib/api';
+import { ApiError, githubIssuesApi, workspacesApi } from '@/shared/lib/api';
 import { getWorkspaceDefaults } from '@/shared/lib/workspaceDefaults';
 import { ErrorDialog } from '@vibe/ui/components/ErrorDialog';
 import { useProjectWorkspaceCreateDraft } from '@/shared/hooks/useProjectWorkspaceCreateDraft';
@@ -168,10 +168,19 @@ function WorkspaceSelectionContent({
     try {
       // Get issue details for initial prompt
       const issue = getIssue(issueId);
+      const githubLink = getGitHubIssueLink(issue?.extension_metadata);
+      const githubComments = githubLink
+        ? await githubIssuesApi
+            .listComments(githubLink.repo_full_name, githubLink.issue_number, {
+              limit: 5,
+            })
+            .catch(() => [])
+        : [];
       const initialPrompt = buildWorkspaceCreatePrompt(
         issue?.title ?? null,
         issue?.description ?? null,
-        getGitHubIssueLink(issue?.extension_metadata)
+        githubLink,
+        githubComments
       );
 
       // Build set of local workspace IDs that exist on this machine

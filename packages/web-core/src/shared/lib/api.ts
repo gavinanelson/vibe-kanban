@@ -105,7 +105,10 @@ import type { Project as RemoteProject } from 'shared/remote-types';
 import type { WorkspaceWithSession } from '@/shared/types/attempt';
 import { createWorkspaceWithSession } from '@/shared/types/attempt';
 import { resolveHostRequestScope } from '@/shared/lib/hostRequestScope';
-import type { GitHubIssueSummary } from '@/shared/lib/githubIssueLink';
+import type {
+  GitHubIssueComment,
+  GitHubIssueSummary,
+} from '@/shared/lib/githubIssueLink';
 import { makeRequest as makeRemoteRequest } from '@/shared/lib/remoteApi';
 import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
 
@@ -1895,6 +1898,10 @@ interface SearchGitHubIssuesResponse {
   issues: GitHubIssueSummary[];
 }
 
+interface ListGitHubIssueCommentsResponse {
+  comments: GitHubIssueComment[];
+}
+
 interface ResolveGitHubIssueUrlRequest {
   url: string;
 }
@@ -1949,6 +1956,44 @@ export const githubIssuesApi = {
       hostId
     );
     return handleApiResponse<GitHubIssueSummary>(response);
+  },
+
+  listComments: async (
+    repoFullName: string,
+    issueNumber: number,
+    opts?: { limit?: number; hostId?: string | null }
+  ): Promise<GitHubIssueComment[]> => {
+    const [owner, repo] = repoFullName.split('/');
+    const params = new URLSearchParams();
+    if (opts?.limit) {
+      params.set('limit', String(opts.limit));
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    const response = await makeHostAwareRequest(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${issueNumber}/comments${suffix}`,
+      opts?.hostId
+    );
+    const result =
+      await handleApiResponse<ListGitHubIssueCommentsResponse>(response);
+    return result.comments;
+  },
+
+  createKanbanUpdateComment: async (
+    repoFullName: string,
+    issueNumber: number,
+    body: string,
+    hostId?: string | null
+  ): Promise<void> => {
+    const [owner, repo] = repoFullName.split('/');
+    const response = await makeHostAwareRequest(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${issueNumber}/comments`,
+      hostId,
+      {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      }
+    );
+    await handleApiResponse<void>(response);
   },
 };
 

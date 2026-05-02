@@ -16,7 +16,7 @@ fn main() {
     }
 
     if let Ok(api_key) = std::env::var("POSTHOG_API_KEY") {
-        println!("cargo:rustc-env={}={}", "POSTHOG_API_KEY", api_key);
+        println!("cargo:rustc-env=POSTHOG_API_KEY={}", api_key);
     }
     if let Ok(api_endpoint) = std::env::var("POSTHOG_API_ENDPOINT") {
         println!("cargo:rustc-env=POSTHOG_API_ENDPOINT={}", api_endpoint);

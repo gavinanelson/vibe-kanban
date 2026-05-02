@@ -1060,10 +1060,23 @@ export function KanbanIssuePanelContainer({
 
         if (displayData.createDraftWorkspace) {
           const githubLink = getGitHubIssueLink(syncedIssue.extension_metadata);
+          const githubComments = githubLink
+            ? await githubIssuesApi
+                .listComments(
+                  githubLink.repo_full_name,
+                  githubLink.issue_number,
+                  {
+                    hostId: effectiveHostId,
+                    limit: 5,
+                  }
+                )
+                .catch(() => [])
+            : [];
           const initialPrompt = buildWorkspaceCreatePrompt(
             displayData.title,
             displayData.description,
-            githubLink
+            githubLink,
+            githubComments
           );
 
           // Get defaults from most recent workspace
@@ -1131,6 +1144,7 @@ export function KanbanIssuePanelContainer({
     onExpectIssueOpen,
     t,
     kanbanCreateGitHubIssueLink,
+    effectiveHostId,
   ]);
 
   const handleCmdEnterSubmit = useCallback(() => {

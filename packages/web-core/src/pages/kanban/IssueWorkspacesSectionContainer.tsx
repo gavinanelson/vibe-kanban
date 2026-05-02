@@ -9,7 +9,7 @@ import { useUserContext } from '@/shared/hooks/useUserContext';
 import { useWorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useProjectWorkspaceCreateDraft } from '@/shared/hooks/useProjectWorkspaceCreateDraft';
-import { workspacesApi, relayApi } from '@/shared/lib/api';
+import { githubIssuesApi, workspacesApi, relayApi } from '@/shared/lib/api';
 import { useHostId } from '@/shared/providers/HostIdProvider';
 import { getWorkspaceDefaults } from '@/shared/lib/workspaceDefaults';
 import {
@@ -151,10 +151,20 @@ export function IssueWorkspacesSectionContainer({
     }
 
     const issue = getIssue(issueId);
+    const githubLink = getGitHubIssueLink(issue?.extension_metadata);
+    const githubComments = githubLink
+      ? await githubIssuesApi
+          .listComments(githubLink.repo_full_name, githubLink.issue_number, {
+            hostId: currentHostId,
+            limit: 5,
+          })
+          .catch(() => [])
+      : [];
     const initialPrompt = buildWorkspaceCreatePrompt(
       issue?.title ?? null,
       issue?.description ?? null,
-      getGitHubIssueLink(issue?.extension_metadata)
+      githubLink,
+      githubComments
     );
     const localWorkspaceIds = buildLocalWorkspaceIdSet(
       activeWorkspaces,
@@ -194,6 +204,7 @@ export function IssueWorkspacesSectionContainer({
     activeWorkspaces,
     archivedWorkspaces,
     workspaces,
+    currentHostId,
     t,
   ]);
 
