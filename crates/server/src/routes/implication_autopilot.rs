@@ -14,7 +14,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use db::models::{
     execution_process::{ExecutionProcessRunReason, ExecutionProcessStatus},
-    merge::MergeStatus,
+    merge::{Merge, MergeStatus, PrMerge},
     pull_request::PullRequest,
     session::{CreateSession, Session},
     workspace::{Workspace, WorkspaceError},
@@ -31,6 +31,7 @@ use executors::{
     model_selector::PermissionPolicy,
     profile::ExecutorConfig,
 };
+use git_host::{GitHostProvider, GitHostService, PullRequestDetail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use services::services::{container::ContainerService, remote_client::RemoteClient, remote_sync};
@@ -251,6 +252,13 @@ pub enum AutopilotAdvanceAction {
     Blocked,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutopilotMergePlan {
+    AttemptPrMerge,
+    ReconcileDone,
+    Blocked(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -408,8 +416,21 @@ async fn advance_workspace(
 ) -> Result<Json<ApiResponse<ImplicationAutopilotAdvanceResponse>>, ApiError> {
     ensure_implication_autopilot_allowed(&deployment, &workspace).await?;
 
-    let action_taken = advance_workspace_once(&deployment, &workspace).await?;
-    let status = build_status(&deployment, &workspace).await?;
+    let (action_taken, merge_blocker) = advance_workspace_once(&deployment, &workspace).await?;
+    let status_workspace = Workspace::find_by_id(&deployment.db().pool, workspace.id)
+        .await?
+        .unwrap_or(workspace);
+    let mut status = build_status(&deployment, &status_workspace).await?;
+    if let Some(blocker) = merge_blocker {
+        status.blocker = Some(blocker.clone());
+        status.next_action = AutopilotNextAction::InvestigateFailure;
+        status.workflow_state = AutopilotWorkflowState::Blocked;
+        status.workflow_state_reason = blocker;
+        status.token_safety_state = AutopilotTokenSafetyState::Blocked;
+        status.token_safety_note =
+            "Merge/done reconciliation is blocked before another Codex session can start."
+                .to_string();
+    }
     Ok(Json(ApiResponse::success(
         ImplicationAutopilotAdvanceResponse {
             action_taken,
@@ -467,7 +488,14 @@ async fn start_auto_review_for_workspace(
         .find(|row| is_review_fix_session(row.session_name.as_deref()));
     let (latest_review_decision, _, latest_review_process) =
         decide_from_review_attempts(deployment, &review_processes).await;
-    let pr_merge_state = infer_pr_merge_state(workspace, &latest_review_decision, None);
+    let pr_status = latest_pr_status(deployment, workspace).await;
+    let pr_merge_state = infer_pr_merge_state(
+        deployment,
+        workspace,
+        &latest_review_decision,
+        pr_status.as_ref(),
+    )
+    .await?;
 
     if let Err(message) = auto_review_start_gate(
         workspace,
@@ -476,7 +504,7 @@ async fn start_auto_review_for_workspace(
         latest_review_process,
         review_fix_process,
         &pr_merge_state,
-        None,
+        pr_status.as_ref(),
         rerun,
     ) {
         return Err(ApiError::Workspace(WorkspaceError::ValidationError(
@@ -636,9 +664,9 @@ async fn start_review_fix_for_workspace(
 async fn advance_workspace_once(
     deployment: &DeploymentImpl,
     workspace: &Workspace,
-) -> Result<AutopilotAdvanceAction, ApiError> {
+) -> Result<(AutopilotAdvanceAction, Option<String>), ApiError> {
     let Some(_advance_guard) = WorkspaceAdvanceGuard::try_acquire(workspace.id) else {
-        return Ok(AutopilotAdvanceAction::Noop);
+        return Ok((AutopilotAdvanceAction::Noop, None));
     };
 
     let client = deployment.remote_client()?;
@@ -657,24 +685,29 @@ async fn advance_workspace_once(
             if let Some(issue) = issue.as_ref() {
                 promote_issue_to_in_review(&client, issue).await?;
             }
-            Ok(AutopilotAdvanceAction::StartedAutoReview)
+            Ok((AutopilotAdvanceAction::StartedAutoReview, None))
         }
         AutopilotNextAction::StartReviewFix => {
             start_review_fix_for_workspace(deployment, workspace).await?;
-            Ok(AutopilotAdvanceAction::StartedReviewFix)
+            Ok((AutopilotAdvanceAction::StartedReviewFix, None))
         }
         AutopilotNextAction::ReadyForMerge => {
-            merge_current_pr(deployment, workspace, issue.as_ref()).await?;
-            Ok(AutopilotAdvanceAction::MergedPullRequest)
+            advance_merge_done_once(
+                deployment,
+                workspace,
+                issue.as_ref(),
+                &status.pr_merge_state,
+            )
+            .await
         }
-        AutopilotNextAction::WaitForImplementation => Ok(AutopilotAdvanceAction::Noop),
+        AutopilotNextAction::WaitForImplementation => Ok((AutopilotAdvanceAction::Noop, None)),
         AutopilotNextAction::NoWorkspace | AutopilotNextAction::InvestigateFailure => {
-            Ok(AutopilotAdvanceAction::Blocked)
+            Ok((AutopilotAdvanceAction::Blocked, status.blocker))
         }
         AutopilotNextAction::WaitForAutoReview
         | AutopilotNextAction::WaitForReviewFix
         | AutopilotNextAction::MergeWait
-        | AutopilotNextAction::Done => Ok(AutopilotAdvanceAction::Noop),
+        | AutopilotNextAction::Done => Ok((AutopilotAdvanceAction::Noop, None)),
     }
 }
 
@@ -701,6 +734,324 @@ impl Drop for WorkspaceAdvanceGuard {
             active.remove(&self.workspace_id);
         }
     }
+}
+
+async fn advance_merge_done_once(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    issue: Option<&Issue>,
+    pr_merge_state: &str,
+) -> Result<(AutopilotAdvanceAction, Option<String>), ApiError> {
+    match merge_plan_from_state(pr_merge_state) {
+        AutopilotMergePlan::ReconcileDone => {
+            reconcile_workspace_done(deployment, workspace, issue).await?;
+            Ok((AutopilotAdvanceAction::Noop, None))
+        }
+        AutopilotMergePlan::Blocked(blocker) => {
+            Ok((AutopilotAdvanceAction::Blocked, Some(blocker)))
+        }
+        AutopilotMergePlan::AttemptPrMerge => {
+            match merge_open_pull_requests(deployment, workspace).await {
+                Ok(()) => {
+                    reconcile_workspace_done(deployment, workspace, issue).await?;
+                    Ok((AutopilotAdvanceAction::Noop, None))
+                }
+                Err(blocker) => Ok((AutopilotAdvanceAction::Blocked, Some(blocker))),
+            }
+        }
+    }
+}
+
+fn merge_plan_from_state(pr_merge_state: &str) -> AutopilotMergePlan {
+    match pr_merge_state {
+        "merged_pending_done" => AutopilotMergePlan::ReconcileDone,
+        "pr_open_pending_merge" => AutopilotMergePlan::AttemptPrMerge,
+        "blocked_by_dirty_worktree" => AutopilotMergePlan::Blocked(
+            "Merge is blocked by dirty/conflicting workspace changes.".to_string(),
+        ),
+        "blocked_by_pr_requirements" => AutopilotMergePlan::Blocked(
+            "PR merge is blocked by GitHub checks, reviews, conflicts, or mergeability."
+                .to_string(),
+        ),
+        "blocked_by_draft_pr" => AutopilotMergePlan::Blocked("PR is still a draft.".to_string()),
+        "blocked_by_failing_checks" => {
+            AutopilotMergePlan::Blocked("PR has failing checks.".to_string())
+        }
+        "blocked_by_pr_mergeability" => AutopilotMergePlan::Blocked(
+            "PR is not currently mergeable according to GitHub.".to_string(),
+        ),
+        "waiting_for_checks" => {
+            AutopilotMergePlan::Blocked("PR checks are not green yet.".to_string())
+        }
+        "review_passed_merge_status_unknown" => AutopilotMergePlan::AttemptPrMerge,
+        "no_pr_merge_found" => AutopilotMergePlan::Blocked(
+            "Review passed, but no open or merged pull request is linked to this workspace."
+                .to_string(),
+        ),
+        _ => AutopilotMergePlan::Blocked(
+            "Review passed, but merge state is not specific enough for the app to advance safely."
+                .to_string(),
+        ),
+    }
+}
+
+async fn merge_open_pull_requests(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Result<(), String> {
+    let merges = Merge::find_by_workspace_id(&deployment.db().pool, workspace.id)
+        .await
+        .map_err(|err| format!("Failed to inspect linked pull requests: {err}"))?;
+    let linked_prs = merges
+        .iter()
+        .filter_map(|merge| match merge {
+            Merge::Pr(pr) => Some(pr.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if linked_prs.is_empty() {
+        return Err(linked_pr_merge_completion_blocker(&[]).unwrap_or_else(|| {
+            "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
+                .to_string()
+        }));
+    }
+
+    let mut final_statuses = Vec::with_capacity(linked_prs.len());
+    let mut blockers = Vec::new();
+    for linked_pr in &linked_prs {
+        if matches!(linked_pr.pr_info.status, MergeStatus::Merged) {
+            final_statuses.push(MergeStatus::Merged);
+            continue;
+        }
+
+        let git_host = match GitHostService::from_url(&linked_pr.pr_info.url) {
+            Ok(git_host) => git_host,
+            Err(err) => {
+                blockers.push(format!(
+                    "Cannot identify pull request provider for PR #{} ({}): {err}",
+                    linked_pr.pr_info.number, linked_pr.pr_info.url
+                ));
+                final_statuses.push(linked_pr.pr_info.status.clone());
+                continue;
+            }
+        };
+        let current_pr_info = match git_host.get_pr_status(&linked_pr.pr_info.url).await {
+            Ok(pr_info) => pr_info,
+            Err(err) => {
+                blockers.push(format!(
+                    "Failed to refresh PR #{} ({}) merge status from GitHub: {err}",
+                    linked_pr.pr_info.number, linked_pr.pr_info.url
+                ));
+                final_statuses.push(linked_pr.pr_info.status.clone());
+                continue;
+            }
+        };
+        if !matches!(
+            current_pr_info.status,
+            MergeStatus::Open | MergeStatus::Merged
+        ) {
+            let status = current_pr_info.status.clone();
+            if let Err(err) =
+                persist_pr_status(deployment, workspace, linked_pr, current_pr_info).await
+            {
+                blockers.push(format!(
+                    "PR #{} ({}) refreshed as {}, but status persistence failed: {err}",
+                    linked_pr.pr_info.number,
+                    linked_pr.pr_info.url,
+                    merge_status_label(&status)
+                ));
+            }
+            final_statuses.push(status.clone());
+            blockers.push(format!(
+                "Cannot complete autopilot merge: PR #{} ({}) is {} after refresh.",
+                linked_pr.pr_info.number,
+                linked_pr.pr_info.url,
+                merge_status_label(&status)
+            ));
+            continue;
+        }
+
+        let pr_info = if matches!(current_pr_info.status, MergeStatus::Merged) {
+            current_pr_info
+        } else {
+            let pr_info = match git_host.merge_pr(&linked_pr.pr_info.url).await {
+                Ok(pr_info) => pr_info,
+                Err(err) => {
+                    let persist_result =
+                        persist_pr_status(deployment, workspace, linked_pr, current_pr_info).await;
+                    let persist_note = persist_result
+                        .err()
+                        .map(|persist_err| {
+                            format!(" Refreshed PR status persistence also failed: {persist_err}.")
+                        })
+                        .unwrap_or_default();
+                    blockers.push(format!(
+                        "PR #{} ({}) merge is blocked by GitHub requirements: {err}.{persist_note}",
+                        linked_pr.pr_info.number, linked_pr.pr_info.url
+                    ));
+                    final_statuses.push(MergeStatus::Open);
+                    continue;
+                }
+            };
+
+            if !matches!(pr_info.status, MergeStatus::Merged) {
+                let status = pr_info.status.clone();
+                if let Err(err) = persist_pr_status(deployment, workspace, linked_pr, pr_info).await
+                {
+                    blockers.push(format!(
+                        "PR #{} ({}) status persistence failed after merge attempt: {err}",
+                        linked_pr.pr_info.number, linked_pr.pr_info.url
+                    ));
+                }
+                final_statuses.push(status.clone());
+                blockers.push(format!(
+                    "GitHub accepted the merge command for PR #{} ({}), but it is {} instead of merged.",
+                    linked_pr.pr_info.number,
+                    linked_pr.pr_info.url,
+                    merge_status_label(&status)
+                ));
+                continue;
+            }
+            pr_info
+        };
+
+        if let Err(err) = persist_pr_status(deployment, workspace, linked_pr, pr_info).await {
+            blockers.push(format!(
+                "PR #{} ({}) merged, but local/remote PR status update failed: {err}",
+                linked_pr.pr_info.number, linked_pr.pr_info.url
+            ));
+        }
+        final_statuses.push(MergeStatus::Merged);
+    }
+
+    if blockers.is_empty() {
+        linked_pr_merge_completion_blocker(&final_statuses).map_or(Ok(()), Err)
+    } else {
+        Err(blockers.join(" "))
+    }
+}
+
+fn linked_pr_merge_completion_blocker(statuses: &[MergeStatus]) -> Option<String> {
+    if statuses.is_empty() {
+        return Some(
+            "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
+                .to_string(),
+        );
+    }
+
+    let open_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Open))
+        .count();
+    if open_count > 0 {
+        return Some(format!(
+            "Not all linked pull requests are merged yet: {open_count} open PR{} remain{} after merge attempts.",
+            if open_count == 1 { "" } else { "s" },
+            if open_count == 1 { "s" } else { "" }
+        ));
+    }
+
+    let closed_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Closed))
+        .count();
+    if closed_count > 0 {
+        return Some(format!(
+            "Cannot complete autopilot merge: {closed_count} linked PR{} {} closed.",
+            if closed_count == 1 { "" } else { "s" },
+            if closed_count == 1 { "is" } else { "are" }
+        ));
+    }
+
+    let unknown_count = statuses
+        .iter()
+        .filter(|status| matches!(status, MergeStatus::Unknown))
+        .count();
+    if unknown_count > 0 {
+        return Some(format!(
+            "Cannot complete autopilot merge: {unknown_count} linked PR{} ha{} unknown status.",
+            if unknown_count == 1 { "" } else { "s" },
+            if unknown_count == 1 { "s" } else { "ve" }
+        ));
+    }
+
+    None
+}
+
+fn merge_status_label(status: &MergeStatus) -> &'static str {
+    match status {
+        MergeStatus::Open => "open",
+        MergeStatus::Merged => "merged",
+        MergeStatus::Closed => "closed",
+        MergeStatus::Unknown => "unknown",
+    }
+}
+
+async fn persist_pr_status(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    linked_pr: &PrMerge,
+    pr_detail: PullRequestDetail,
+) -> Result<(), String> {
+    let status = pr_detail.status.clone();
+    let merged_at = pr_detail.merged_at;
+    let merge_commit_sha = pr_detail.merge_commit_sha.clone();
+    let url = pr_detail.url.clone();
+
+    PullRequest::update_status(
+        &deployment.db().pool,
+        &url,
+        &status,
+        merged_at,
+        merge_commit_sha.clone(),
+    )
+    .await
+    .map_err(|err| format!("Local PR status update failed: {err}"))?;
+
+    if let Ok(client) = deployment.remote_client() {
+        let request = UpsertPullRequestRequest {
+            url,
+            number: pr_detail.number as i32,
+            status: pull_request_status_from_merge_status(&status),
+            merged_at,
+            merge_commit_sha,
+            target_branch_name: linked_pr.target_branch_name.clone(),
+            local_workspace_id: workspace.id,
+        };
+        tokio::spawn(async move {
+            remote_sync::sync_pr_to_remote(&client, request).await;
+        });
+    }
+
+    Ok(())
+}
+
+fn pull_request_status_from_merge_status(status: &MergeStatus) -> PullRequestStatus {
+    match status {
+        MergeStatus::Merged => PullRequestStatus::Merged,
+        MergeStatus::Closed => PullRequestStatus::Closed,
+        MergeStatus::Open | MergeStatus::Unknown => PullRequestStatus::Open,
+    }
+}
+
+async fn reconcile_workspace_done(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+    issue: Option<&Issue>,
+) -> Result<(), ApiError> {
+    if let Some(issue) = issue {
+        promote_issue_to_done(&deployment.remote_client()?, issue).await?;
+    }
+
+    if !workspace.pinned {
+        deployment
+            .container()
+            .archive_workspace(workspace.id)
+            .await?;
+    }
+
+    Ok(())
 }
 
 async fn build_autopilot_review_context(
@@ -732,137 +1083,6 @@ async fn build_autopilot_review_context(
     }
 
     Ok((!contexts.is_empty()).then_some(contexts))
-}
-
-async fn merge_current_pr(
-    deployment: &DeploymentImpl,
-    workspace: &Workspace,
-    issue: Option<&Issue>,
-) -> Result<(), ApiError> {
-    let Some(pr_status) = latest_pr_status(deployment, workspace).await else {
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            "Cannot auto-merge because no current PR status is visible.".to_string(),
-        )));
-    };
-
-    if let Err(message) = auto_merge_gate(&pr_status) {
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            message,
-        )));
-    }
-
-    let output = tokio::process::Command::new("gh")
-        .args(["pr", "merge", &pr_status.url, "--merge"])
-        .output()
-        .await
-        .map_err(|err| {
-            ApiError::Workspace(WorkspaceError::ValidationError(format!(
-                "Failed to run gh pr merge: {err}"
-            )))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            if stderr.is_empty() {
-                "gh pr merge failed without an error message.".to_string()
-            } else {
-                format!("gh pr merge failed: {stderr}")
-            },
-        )));
-    }
-
-    let merged_status = pr_status_from_url(&pr_status.url).await.ok_or_else(|| {
-        ApiError::Workspace(WorkspaceError::ValidationError(
-            "PR merge command completed, but GitHub status could not be refreshed.".to_string(),
-        ))
-    })?;
-
-    if !merged_status.state.eq_ignore_ascii_case("merged") {
-        return Err(ApiError::Workspace(WorkspaceError::ValidationError(
-            "PR merge command completed, but the refreshed PR is not merged.".to_string(),
-        )));
-    }
-
-    PullRequest::update_status(
-        &deployment.db().pool,
-        &merged_status.url,
-        &MergeStatus::Merged,
-        Some(Utc::now()),
-        merged_status.merge_commit_sha.clone(),
-    )
-    .await?;
-
-    if let Some(client) = deployment.remote_client().ok() {
-        let request = UpsertPullRequestRequest {
-            url: merged_status.url.clone(),
-            number: merged_status.number as i32,
-            status: PullRequestStatus::Merged,
-            merged_at: Some(Utc::now()),
-            merge_commit_sha: merged_status.merge_commit_sha.clone(),
-            target_branch_name: merged_status
-                .base_branch
-                .clone()
-                .unwrap_or_else(|| workspace.branch.clone()),
-            local_workspace_id: workspace.id,
-        };
-        remote_sync::sync_pr_to_remote(&client, request).await;
-
-        if let Some(issue) = issue {
-            promote_issue_to_done(&client, issue).await?;
-        }
-    }
-
-    let open_pr_count =
-        PullRequest::count_open_for_workspace(&deployment.db().pool, workspace.id).await?;
-    if open_pr_count == 0 && !workspace.pinned {
-        deployment
-            .container()
-            .archive_workspace(workspace.id)
-            .await?;
-    }
-
-    Ok(())
-}
-
-fn auto_merge_gate(pr_status: &AutopilotPrStatus) -> Result<(), String> {
-    if !pr_status.state.eq_ignore_ascii_case("open") {
-        return Err(format!(
-            "PR is not open; current state is {}.",
-            pr_status.state
-        ));
-    }
-    if pr_status.is_draft {
-        return Err("PR is still a draft.".to_string());
-    }
-    if let Some(blocker) = pr_status.merge_blocker.as_deref() {
-        return Err(blocker.to_string());
-    }
-    if !matches!(
-        pr_status.checks_state,
-        AutopilotPrChecksState::Passing | AutopilotPrChecksState::NoChecks
-    ) {
-        return Err(format!(
-            "PR checks are not ready for merge: {}",
-            pr_status.checks_summary
-        ));
-    }
-    if pr_status.mergeable.is_none() {
-        return Err("PR mergeability is unknown.".to_string());
-    }
-    if pr_status
-        .mergeable
-        .as_deref()
-        .is_some_and(|value| !value.eq_ignore_ascii_case("MERGEABLE"))
-    {
-        return Err(format!(
-            "PR is not mergeable ({}/{}).",
-            pr_status.mergeable.as_deref().unwrap_or("unknown"),
-            pr_status.merge_state_status.as_deref().unwrap_or("unknown")
-        ));
-    }
-
-    Ok(())
 }
 
 async fn ensure_implication_autopilot_allowed(
@@ -1022,8 +1242,13 @@ async fn build_status(
     };
     let review_fix_state = review_fix_state(review_fix_process);
     let pr_status = latest_pr_status(deployment, workspace).await;
-    let pr_merge_state =
-        infer_pr_merge_state(workspace, &latest_review_decision, pr_status.as_ref());
+    let pr_merge_state = infer_pr_merge_state(
+        deployment,
+        workspace,
+        &latest_review_decision,
+        pr_status.as_ref(),
+    )
+    .await?;
     let (next_action, blocker) = next_action(
         workspace,
         implementation_process,
@@ -1682,38 +1907,133 @@ fn excerpt(text: &str) -> String {
     compact.chars().take(280).collect()
 }
 
-fn infer_pr_merge_state(
+async fn infer_pr_merge_state(
+    deployment: &DeploymentImpl,
     workspace: &Workspace,
     decision: &AutopilotDecision,
     pr_status: Option<&AutopilotPrStatus>,
-) -> String {
+) -> Result<String, ApiError> {
     if workspace.archived || workspace.worktree_deleted {
-        return "done_or_archived".to_string();
+        return Ok("done_or_archived".to_string());
     }
+
+    if decision != &AutopilotDecision::Pass {
+        return Ok(match decision {
+            AutopilotDecision::RequestChanges => "blocked_by_review".to_string(),
+            AutopilotDecision::Running => "waiting_for_review".to_string(),
+            AutopilotDecision::Missing => "waiting_for_review".to_string(),
+            AutopilotDecision::Failed => "review_failed".to_string(),
+            AutopilotDecision::Pass => unreachable!(),
+        });
+    }
+
     if let Some(pr_status) = pr_status {
         if pr_status.state.eq_ignore_ascii_case("merged") {
-            return "merged".to_string();
+            return Ok("merged_pending_done".to_string());
         }
         if let Some(blocker) = pr_status.merge_blocker.as_deref() {
             if blocker.contains("draft") {
-                return "blocked_by_draft_pr".to_string();
+                return Ok("blocked_by_draft_pr".to_string());
             }
             if blocker.contains("failing checks") {
-                return "blocked_by_failing_checks".to_string();
+                return Ok("blocked_by_failing_checks".to_string());
             }
             if blocker.contains("checks are not green") {
-                return "waiting_for_checks".to_string();
+                return Ok("waiting_for_checks".to_string());
             }
-            return "blocked_by_pr_mergeability".to_string();
+            return Ok("blocked_by_pr_mergeability".to_string());
         }
     }
-    match decision {
-        AutopilotDecision::Pass => "review_passed_merge_status_unknown".to_string(),
-        AutopilotDecision::RequestChanges => "blocked_by_review".to_string(),
-        AutopilotDecision::Running => "waiting_for_review".to_string(),
-        AutopilotDecision::Missing => "waiting_for_review".to_string(),
-        AutopilotDecision::Failed => "review_failed".to_string(),
+
+    let merges = Merge::find_by_workspace_id(&deployment.db().pool, workspace.id).await?;
+    let pr_statuses = merges
+        .iter()
+        .filter_map(|merge| match merge {
+            Merge::Pr(pr) => Some(pr.pr_info.status.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if pr_statuses
+        .iter()
+        .any(|status| matches!(status, MergeStatus::Open))
+    {
+        if workspace_has_dirty_or_conflicting_changes(deployment, workspace).await? {
+            return Ok("blocked_by_dirty_worktree".to_string());
+        }
+        return Ok("pr_open_pending_merge".to_string());
     }
+
+    if let Some(state) = merge_state_from_pr_completion(&pr_statuses) {
+        if state == "merged_pending_done"
+            && workspace.pinned
+            && linked_issue_is_done(deployment, workspace).await?
+        {
+            return Ok("done_or_archived".to_string());
+        }
+        return Ok(state.to_string());
+    }
+
+    if merges.iter().any(|merge| matches!(merge, Merge::Direct(_))) {
+        if workspace.pinned && linked_issue_is_done(deployment, workspace).await? {
+            return Ok("done_or_archived".to_string());
+        }
+        return Ok("merged_pending_done".to_string());
+    }
+
+    Ok("no_pr_merge_found".to_string())
+}
+
+fn merge_state_from_pr_completion(statuses: &[MergeStatus]) -> Option<&'static str> {
+    if statuses.is_empty() {
+        return None;
+    }
+    if linked_pr_merge_completion_blocker(statuses).is_none() {
+        return Some("merged_pending_done");
+    }
+    Some("blocked_by_pr_requirements")
+}
+
+async fn linked_issue_is_done(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Result<bool, ApiError> {
+    let client = deployment.remote_client()?;
+    let remote_workspace = client.get_workspace_by_local_id(workspace.id).await?;
+    let Some(issue_id) = remote_workspace.issue_id else {
+        return Ok(false);
+    };
+    let issue = client.get_issue(issue_id).await?;
+    Ok(issue.completed_at.is_some())
+}
+
+async fn workspace_has_dirty_or_conflicting_changes(
+    deployment: &DeploymentImpl,
+    workspace: &Workspace,
+) -> Result<bool, ApiError> {
+    let Some(container_ref) = workspace.container_ref.as_deref() else {
+        return Ok(false);
+    };
+    let workspace_path = PathBuf::from(container_ref);
+    let repos =
+        WorkspaceRepo::find_repos_for_workspace(&deployment.db().pool, workspace.id).await?;
+
+    for repo in repos {
+        let worktree_path = workspace_path.join(&repo.name);
+        let conflicted_files = deployment.git().get_conflicted_files(&worktree_path)?;
+        if !conflicted_files.is_empty() || deployment.git().is_rebase_in_progress(&worktree_path)? {
+            return Ok(true);
+        }
+
+        let (uncommitted_count, untracked_count) = deployment
+            .git()
+            .get_worktree_change_counts(&worktree_path)?;
+        if uncommitted_count > 0 || untracked_count > 0 {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn review_fix_start_gate(
@@ -1929,7 +2249,7 @@ fn workflow_state(
         AutopilotNextAction::ReadyForMerge => (
             AutopilotWorkflowState::ReviewPassed,
             blocker
-                .unwrap_or("Review passed; merge handoff is visible.")
+                .unwrap_or("Review passed; app advance owns merge/done reconciliation.")
                 .to_string(),
         ),
         AutopilotNextAction::MergeWait => (
@@ -2012,7 +2332,7 @@ fn next_action(
     latest_review: Option<&ProcessRow>,
     review_fix: Option<&ProcessRow>,
     pr_merge_state: &str,
-    pr_status: Option<&AutopilotPrStatus>,
+    _pr_status: Option<&AutopilotPrStatus>,
 ) -> (AutopilotNextAction, Option<String>) {
     if workspace.archived
         || workspace.worktree_deleted
@@ -2061,33 +2381,31 @@ fn next_action(
             ),
             _ => (AutopilotNextAction::StartReviewFix, None),
         },
-        AutopilotDecision::Pass => match pr_status {
-            Some(pr) if pr.state.eq_ignore_ascii_case("merged") => {
-                (AutopilotNextAction::Done, None)
+        AutopilotDecision::Pass => match merge_plan_from_state(pr_merge_state) {
+            AutopilotMergePlan::Blocked(blocker)
+                if pr_merge_state == "blocked_by_dirty_worktree"
+                    || pr_merge_state == "blocked_by_draft_pr"
+                    || pr_merge_state == "blocked_by_failing_checks"
+                    || pr_merge_state == "blocked_by_pr_mergeability" =>
+            {
+                (AutopilotNextAction::InvestigateFailure, Some(blocker))
             }
-            Some(pr) if pr.merge_blocker.is_some() => {
-                let blocker = pr
-                    .merge_blocker
-                    .clone()
-                    .unwrap_or_else(|| "PR is not ready for merge.".to_string());
-                let action = match pr.checks_state {
-                    AutopilotPrChecksState::Pending | AutopilotPrChecksState::Unknown => {
-                        AutopilotNextAction::MergeWait
-                    }
-                    _ => AutopilotNextAction::InvestigateFailure,
-                };
-                (action, Some(blocker))
+            AutopilotMergePlan::Blocked(blocker) if pr_merge_state == "waiting_for_checks" => {
+                (AutopilotNextAction::MergeWait, Some(blocker))
             }
-            Some(_) => (
+            AutopilotMergePlan::Blocked(blocker) => {
+                (AutopilotNextAction::ReadyForMerge, Some(blocker))
+            }
+            AutopilotMergePlan::AttemptPrMerge => (
                 AutopilotNextAction::ReadyForMerge,
                 Some(
-                    "Review passed and the PR appears mergeable with green or absent checks."
+                    "Review passed; app advance will attempt the linked PR merge and report GitHub blockers."
                         .to_string(),
                 ),
             ),
-            None => (
+            AutopilotMergePlan::ReconcileDone => (
                 AutopilotNextAction::ReadyForMerge,
-                Some("Review passed; no current PR status is visible to the app yet.".to_string()),
+                Some("Review passed; app advance will reconcile merged PR state to Done.".to_string()),
             ),
         },
     }
@@ -2737,7 +3055,7 @@ mod tests {
     }
 
     #[test]
-    fn next_action_surfaces_review_pass_as_ready_for_merge_but_not_automated() {
+    fn next_action_surfaces_review_pass_as_ready_for_app_merge() {
         let implementation = completed_process("Implementation", 0);
         let workspace = workspace();
         let (next_action, blocker) = next_action(
@@ -2746,12 +3064,129 @@ mod tests {
             &AutopilotDecision::Pass,
             None,
             None,
-            "review_passed_merge_status_unknown",
+            "pr_open_pending_merge",
             None,
         );
 
         assert_eq!(next_action, AutopilotNextAction::ReadyForMerge);
-        assert!(blocker.unwrap().contains("no current PR status"));
+        assert!(blocker.unwrap().contains("app advance"));
+    }
+
+    #[test]
+    fn merge_plan_reconciles_merged_pr_to_done_without_new_agent_session() {
+        let plan = merge_plan_from_state("merged_pending_done");
+
+        assert_eq!(plan, AutopilotMergePlan::ReconcileDone);
+    }
+
+    #[test]
+    fn linked_pr_completion_allows_multiple_merged_pull_requests() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Merged, MergeStatus::Merged]),
+            None
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_blocks_when_any_pull_request_remains_open() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[
+                MergeStatus::Merged,
+                MergeStatus::Open,
+                MergeStatus::Merged
+            ]),
+            Some(
+                "Not all linked pull requests are merged yet: 1 open PR remains after merge attempts."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_blocks_closed_or_unknown_pull_requests() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Merged, MergeStatus::Closed]),
+            Some("Cannot complete autopilot merge: 1 linked PR is closed.".to_string())
+        );
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[MergeStatus::Unknown]),
+            Some("Cannot complete autopilot merge: 1 linked PR has unknown status.".to_string())
+        );
+    }
+
+    #[test]
+    fn linked_pr_completion_reports_missing_prs_as_recoverable() {
+        assert_eq!(
+            linked_pr_merge_completion_blocker(&[]),
+            Some(
+                "No linked pull requests were found for this workspace; create or link a PR and rerun app advance."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn merge_state_requires_all_linked_pull_requests_merged_before_done() {
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Merged]),
+            Some("merged_pending_done")
+        );
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Closed]),
+            Some("blocked_by_pr_requirements")
+        );
+        assert_eq!(
+            merge_state_from_pr_completion(&[MergeStatus::Merged, MergeStatus::Unknown]),
+            Some("blocked_by_pr_requirements")
+        );
+        assert_eq!(merge_state_from_pr_completion(&[]), None);
+    }
+
+    #[test]
+    fn done_or_archived_state_is_terminal_for_pinned_reconciliation() {
+        let implementation = completed_process("Implementation", 0);
+        let mut workspace = workspace();
+        workspace.pinned = true;
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            None,
+            "done_or_archived",
+            None,
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::Done);
+        assert_eq!(blocker, None);
+    }
+
+    #[test]
+    fn next_action_blocks_dirty_or_conflicted_merge_state_after_review_pass() {
+        let implementation = completed_process("Implementation", 0);
+        let workspace = workspace();
+        let (next_action, blocker) = next_action(
+            &workspace,
+            Some(&implementation),
+            &AutopilotDecision::Pass,
+            None,
+            None,
+            "blocked_by_dirty_worktree",
+            None,
+        );
+
+        assert_eq!(next_action, AutopilotNextAction::InvestigateFailure);
+        assert_eq!(
+            blocker,
+            Some("Merge is blocked by dirty/conflicting workspace changes.".to_string())
+        );
+        assert_eq!(
+            merge_plan_from_state("blocked_by_pr_requirements"),
+            AutopilotMergePlan::Blocked(
+                "PR merge is blocked by GitHub checks, reviews, conflicts, or mergeability."
+                    .to_string()
+            )
+        );
     }
 
     #[test]
@@ -2821,20 +3256,20 @@ mod tests {
     }
 
     #[test]
-    fn workflow_state_marks_review_pass_as_merge_handoff_without_token_use() {
+    fn workflow_state_marks_review_pass_as_app_owned_merge_without_token_use() {
         let implementation = completed_process("Implementation", 0);
         let (state, reason) = workflow_state(
             &AutopilotNextAction::ReadyForMerge,
-            Some("Review passed; merge handoff is visible."),
+            Some("Review passed; app advance owns merge/done reconciliation."),
             Some(&implementation),
             &AutopilotDecision::Pass,
             None,
             None,
-            "review_passed_merge_status_unknown",
+            "pr_open_pending_merge",
         );
 
         assert_eq!(state, AutopilotWorkflowState::ReviewPassed);
-        assert!(reason.contains("merge handoff"));
+        assert!(reason.contains("app advance"));
     }
 
     #[test]

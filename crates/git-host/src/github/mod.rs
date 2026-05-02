@@ -254,6 +254,20 @@ impl GitHostProvider for GitHubProvider {
         .await
     }
 
+    async fn merge_pr(&self, pr_url: &str) -> Result<PullRequestDetail, GitHostError> {
+        let cli = self.gh_cli.clone();
+        let url = pr_url.to_string();
+
+        let pr = task::spawn_blocking(move || cli.merge_pr(&url))
+            .await
+            .map_err(|err| {
+                GitHostError::PullRequest(format!(
+                    "Failed to execute GitHub CLI for merging PR: {err}"
+                ))
+            })?;
+        pr.map_err(GitHostError::from)
+    }
+
     async fn list_prs_for_branch(
         &self,
         repo_path: &Path,

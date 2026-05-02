@@ -297,6 +297,12 @@ impl GhCli {
         Self::parse_pr_view(&raw)
     }
 
+    /// Merge a pull request through GitHub's normal branch protection checks.
+    pub fn merge_pr(&self, pr_url: &str) -> Result<PullRequestDetail, GhCliError> {
+        self.run(["pr", "merge", pr_url, "--squash", "--delete-branch"], None)?;
+        self.view_pr(pr_url)
+    }
+
     /// List pull requests for a branch (includes closed/merged).
     pub fn list_prs_for_branch(
         &self,

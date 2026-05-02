@@ -28,6 +28,8 @@ pub trait GitHostProvider: Send + Sync {
 
     async fn get_pr_status(&self, pr_url: &str) -> Result<PullRequestDetail, GitHostError>;
 
+    async fn merge_pr(&self, pr_url: &str) -> Result<PullRequestDetail, GitHostError>;
+
     async fn list_prs_for_branch(
         &self,
         repo_path: &Path,
