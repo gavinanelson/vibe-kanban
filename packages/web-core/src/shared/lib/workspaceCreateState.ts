@@ -4,7 +4,10 @@ import { ScratchType } from 'shared/types';
 import type { AppRuntime } from '@/shared/hooks/useAppRuntime';
 import { scratchApi } from '@/shared/lib/api';
 import { localStorageScratchUpdate } from '@/shared/hooks/useLocalStorageScratch';
-import type { GitHubIssueLink } from '@/shared/lib/githubIssueLink';
+import type {
+  GitHubIssueComment,
+  GitHubIssueLink,
+} from '@/shared/lib/githubIssueLink';
 
 interface WorkspaceDefaultsLike {
   preferredRepos?: CreateModeInitialState['preferredRepos'];
@@ -27,7 +30,8 @@ export const DEFAULT_WORKSPACE_CREATE_DRAFT_ID =
 export function buildWorkspaceCreatePrompt(
   title: string | null | undefined,
   description: string | null | undefined,
-  githubIssueLink?: GitHubIssueLink | null
+  githubIssueLink?: GitHubIssueLink | null,
+  githubIssueComments: GitHubIssueComment[] = []
 ): string | null {
   const trimmedTitle = title?.trim();
   if (!trimmedTitle) return null;
@@ -41,7 +45,41 @@ export function buildWorkspaceCreatePrompt(
     return basePrompt;
   }
 
-  return `${basePrompt}\n\n---\nLinked GitHub issue: ${githubIssueLink.repo_full_name}#${githubIssueLink.issue_number}\nIssue URL: ${githubIssueLink.issue_url}\nMaintain task progress visibility on that issue while you work.`;
+  const commentContext = formatGitHubIssueCommentContext(githubIssueComments);
+  const commentSection = commentContext
+    ? `\n\nRecent GitHub issue comments:\n${commentContext}`
+    : '';
+
+  return `${basePrompt}\n\n---\nLinked GitHub issue: ${githubIssueLink.repo_full_name}#${githubIssueLink.issue_number}\nIssue URL: ${githubIssueLink.issue_url}${commentSection}\nMaintain task progress visibility on that issue while you work.`;
+}
+
+export function formatGitHubIssueCommentContext(
+  comments: GitHubIssueComment[],
+  limit = 5
+): string {
+  return comments
+    .slice(0, limit)
+    .filter((comment) => comment.body.trim().length > 0)
+    .map((comment) => {
+      const author = comment.author_login
+        ? `@${comment.author_login}`
+        : 'unknown author';
+      const createdAt = comment.created_at ?? 'unknown time';
+      const body = truncateGitHubIssueComment(
+        comment.body.trim().replace(/\n{3,}/g, '\n\n')
+      );
+      return `- ${author} at ${createdAt}: ${body}`;
+    })
+    .filter((line) => line.trim().length > 0)
+    .join('\n');
+}
+
+function truncateGitHubIssueComment(body: string): string {
+  const maxLength = 1200;
+  if (body.length <= maxLength) {
+    return body;
+  }
+  return `${body.slice(0, maxLength).trimEnd()}\n[truncated]`;
 }
 
 export function buildLinkedIssueCreateState(

@@ -1333,18 +1333,19 @@ async fn list_processes(
 }
 
 fn process_summary(row: &ProcessRow) -> AutopilotProcessSummary {
-    process_summary_from_parts(
-        row.id,
-        row.session_id,
-        row.session_name.clone(),
-        row.status.clone(),
-        row.run_reason.clone(),
-        row.exit_code,
-        row.started_at.clone(),
-        row.completed_at.clone(),
-    )
+    AutopilotProcessSummary {
+        id: row.id,
+        session_id: row.session_id,
+        session_name: row.session_name.clone(),
+        status: row.status.clone(),
+        run_reason: row.run_reason.clone(),
+        exit_code: row.exit_code,
+        started_at: row.started_at.clone(),
+        completed_at: row.completed_at.clone(),
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_summary_from_parts(
     id: Uuid,
     session_id: Uuid,
@@ -2080,6 +2081,7 @@ fn review_fix_start_gate(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn auto_review_start_gate(
     workspace: &Workspace,
     implementation: Option<&ProcessRow>,
@@ -2117,10 +2119,10 @@ fn auto_review_start_gate(
         }
     }
 
-    if let Some(blocker) = blocker {
-        if !rerun {
-            return Err(blocker);
-        }
+    if let Some(blocker) = blocker
+        && !rerun
+    {
+        return Err(blocker);
     }
 
     Ok(())

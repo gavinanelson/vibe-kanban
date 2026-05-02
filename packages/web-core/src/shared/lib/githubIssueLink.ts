@@ -24,6 +24,15 @@ export type GitHubIssueSummary = {
   updated_at?: string | null;
 };
 
+export type GitHubIssueComment = {
+  id: string;
+  author_login?: string | null;
+  author_association: string;
+  body: string;
+  created_at?: string | null;
+  url: string;
+};
+
 const GITHUB_LINK_KEY = 'github_link';
 
 function isJsonRecord(value: unknown): value is JsonRecord {
